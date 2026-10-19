@@ -15,15 +15,18 @@ Contiene 2.048 noticias clasificadas en 12 temas y no incluye una clase
 
 ## Ejecución
 
-Desde este directorio, ejecutar en orden:
+Desde la raíz del proyecto, ejecutar en orden los scripts situados en
+`evaluation/`:
 
 ```bash
-python3 semantic_similarity_test.py
-python3 rerank_candidate_topics.py
-python3 evaluate_ollama_top_n_no_none.py
-python3 evaluate_ollama_all_topics_no_none.py
+python3 evaluation/semantic_similarity_test.py
+python3 evaluation/rerank_candidate_topics.py
+python3 evaluation/evaluate_ollama_top_n_no_none.py
+python3 evaluation/evaluate_ollama_all_topics.py
 ```
 
-La similitud genera `semantic_similarity_results/`; el reranker produce
-`reranked_topic_results.json`. Los evaluadores usan `llama3.2:3b` y obligan al
-modelo a seleccionar un tema candidato.
+Los scripts resuelven sus rutas independientemente del directorio de trabajo y
+siguen leyendo y escribiendo los datos dentro de `dataset_mteb/`. La similitud
+genera `dataset_mteb/semantic_similarity_results/`; el reranker produce
+`dataset_mteb/reranked_topic_results.json`. Los evaluadores usan
+`llama3.2:3b` y obligan al modelo a seleccionar un tema candidato.
