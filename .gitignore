@@ -1,0 +1,12 @@
+Pipfile
+*.lock
+*.pdf
+*.png
+*.pyc
+.agents
+.aws
+.codex
+*.json
+!temas.json
+!data_test/*.json
+!data_validation/*.json

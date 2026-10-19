@@ -1,0 +1,25 @@
+{
+  "tecnología": "Tecnología digital y electrónica: dispositivos, ordenadores, móviles, software, aplicaciones, internet, inteligencia artificial, ciberseguridad, telecomunicaciones, plataformas digitales e innovación tecnológica. Empresas tecnológicas cuando el foco está en sus productos, servicios o desarrollos, no en sus resultados financieros.",
+
+  "juegos": "Entretenimiento, cultura popular y ocio: cine, películas, series, televisión, música, videojuegos, actores, actrices, cantantes, celebridades, estrenos, premios, espectáculos y contenidos audiovisuales. Plataformas como Netflix, Disney o Spotify cuando el foco está en contenidos y entretenimiento, no en su tecnología o resultados empresariales.",
+
+  "deportes": "Actividad deportiva: partidos, competiciones, resultados, clasificaciones, equipos, clubes, selecciones, deportistas, entrenadores, fichajes, lesiones deportivas, torneos, campeonatos y actualidad de cualquier disciplina deportiva.",
+
+  "politica": "Actividad política e institucional civil: gobiernos, partidos políticos, elecciones, parlamentos, presidentes, ministros, administraciones públicas, legislación, políticas públicas, debates políticos y decisiones gubernamentales. No incluye operaciones militares o conflictos armados cuando la dimensión militar es el tema principal.",
+
+  "economia": "Actividad económica, empresarial y financiera: empresas, empleo, mercados, bolsa, banca, inversión, comercio, inflación, precios, crecimiento, beneficios, pérdidas, adquisiciones, fusiones y resultados empresariales. Compañías tecnológicas, automovilísticas o de otros sectores cuando el foco está principalmente en su negocio o situación financiera.",
+
+  "motor": "Vehículos y sector del automóvil y la motocicleta: coches, motos, nuevos modelos, pruebas de vehículos, motores, prestaciones, diseño, conducción, movilidad, vehículos eléctricos, seguridad vial y novedades de fabricantes. No incluye noticias centradas principalmente en ventas, beneficios o resultados financieros de fabricantes.",
+
+  "alimentación": "Gastronomía, cocina y alimentación: recetas, ingredientes, platos, restaurantes, chefs, productos alimentarios, bebidas, técnicas culinarias, hábitos gastronómicos y cultura de la comida. No incluye contenidos centrados principalmente en enfermedades, tratamientos médicos o efectos clínicos de la alimentación.",
+
+  "ejercito": "Actividad militar y defensa: fuerzas armadas, ejércitos, guerras, conflictos bélicos, operaciones militares, tropas, armamento, ataques, maniobras, estrategia militar y seguridad vinculada directamente a fuerzas militares. No incluye política general salvo que la dimensión militar o de defensa sea el asunto principal.",
+
+  "moda": "Moda, belleza y estilo personal: ropa, calzado, accesorios, diseñadores, marcas de moda, pasarelas, tendencias, modelos, cosmética, maquillaje, peluquería y cuidado estético. Celebridades cuando el foco está en su vestimenta, estilo, belleza o participación en eventos de moda.",
+
+  "astronomia": "Astronomía y exploración espacial: estrellas, planetas, galaxias, agujeros negros, cometas, asteroides, cosmología, telescopios, observatorios, cohetes, sondas, misiones espaciales, astronautas y descubrimientos relacionados con el universo.",
+
+  "religion": "Religión y actividad de instituciones y comunidades religiosas: iglesias, confesiones, creencias, fe, líderes religiosos, ceremonias, celebraciones religiosas, organizaciones religiosas, doctrina y acontecimientos vinculados directamente a la práctica religiosa.",
+
+  "medicina": "Salud y medicina: enfermedades, síntomas, diagnósticos, tratamientos, medicamentos, vacunas, investigación médica, hospitales, médicos, pacientes, prevención, salud pública y avances clínicos. Alimentación o hábitos de vida solo cuando el foco está principalmente en sus efectos médicos o sanitarios."
+}
