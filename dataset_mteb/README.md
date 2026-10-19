@@ -30,3 +30,25 @@ siguen leyendo y escribiendo los datos dentro de `dataset_mteb/`. La similitud
 genera `dataset_mteb/semantic_similarity_results/`; el reranker produce
 `dataset_mteb/reranked_topic_results.json`. Los evaluadores usan
 `llama3.2:3b` y obligan al modelo a seleccionar un tema candidato.
+
+## Evaluaciones auxiliares
+
+Para calcular los informes Top-1 de E5 y BGE y ejecutar o reanudar el de
+Llama:
+
+```bash
+evaluation/top_1/calculate_top_1.sh
+```
+
+La opción `--skip-llama` limita el cálculo a los resultados precomputados de
+E5 y BGE. El modelo de Ollama se puede cambiar con `--llama-model`.
+
+Para evaluar Llama directamente sobre los candidatos del ranking E5:
+
+```bash
+evaluation/E5_top_N_llama/run_e5_top_n_llama.sh
+```
+
+Sin argumentos procesa `N=2..12`; también acepta una lista concreta, por
+ejemplo `2 3 5`. Cada N utiliza su propio resultado reanudable dentro de
+`evaluation/E5_top_N_llama/results/`.
