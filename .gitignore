@@ -11,4 +11,5 @@ Pipfile
 !data_test/*.json
 !data_validation/*.json
 !dataset_mteb/data_test/*.json
-!dataset_mteb/data_validation/*.json
+!dataset_mteb/data_test_labelled/*.json
+evaluation/run_logs/
