@@ -364,7 +364,7 @@ def main() -> None:
         hits = metric['hits']
         recall_percent = metric['candidate_recall_percent']
         precision_percent = report['metrics']['retrieval_precision_at_n'][n][
-            'precision_percent'
+            'retrieval_precision_percent'
         ]
         print(
             f'E5 Candidate Recall@{n}: {hits}/{len(predictions)} '
