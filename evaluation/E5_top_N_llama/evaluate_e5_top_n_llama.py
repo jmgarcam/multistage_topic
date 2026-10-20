@@ -17,10 +17,16 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 EVALUATION_DIR = SCRIPT_DIR.parent
 PROJECT_DIR = EVALUATION_DIR.parent
 DATASET_DIR = PROJECT_DIR / 'dataset_mteb'
-DEFAULT_RESULTS_DIR = SCRIPT_DIR / 'results_llama3_2_3b'
+DEFAULT_E5_RESULTS = (
+    EVALUATION_DIR / 'E5_top_N' / 'results' / 'e5_top_n_results.json'
+)
+DEFAULT_RESULTS_DIR = SCRIPT_DIR / 'results_llama3_1_8b'
 DEFAULT_CHECKPOINT_EVERY = 10
 PROMPT_VERSION = 'mteb_forced_topic_selection_v1_e5_top_n_v1'
 DIRECT_CANDIDATE_SOURCE = 'E5 computed directly from data_test'
+PRECOMPUTED_CANDIDATE_SOURCE = (
+    'validated complete ranking from E5 Top-N report'
+)
 LEGACY_CANDIDATE_SOURCE = 'E5 cosine-similarity ranking'
 
 if str(EVALUATION_DIR) not in sys.path:
@@ -47,7 +53,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--model',
-        default=os.environ.get('OLLAMA_MODEL', 'llama3.2:3b'),
+        default=os.environ.get('OLLAMA_MODEL', 'llama3.1:8b'),
         help='Modelo disponible en Ollama.',
     )
     parser.add_argument(
@@ -60,6 +66,20 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=e5.DEFAULT_BATCH_SIZE,
         help='Número de textos codificados por lote con E5.',
+    )
+    parser.add_argument(
+        '--e5-results',
+        type=Path,
+        default=DEFAULT_E5_RESULTS,
+        help=(
+            'Informe E5 Top-N cuyo ranking completo se reutiliza después '
+            'de validarlo.'
+        ),
+    )
+    parser.add_argument(
+        '--recompute-e5',
+        action='store_true',
+        help='Ignora el informe E5 Top-N y vuelve a ejecutar el bi-encoder.',
     )
     parser.add_argument(
         '--data-dir',
@@ -227,8 +247,13 @@ def build_report(
             'e5_topic_representation': e5.TOPIC_TEMPLATE,
             'e5_ranking_sha256': e5_context['ranking_sha256'],
             'llama_model': base.MODEL_NAME,
-            'candidate_source': DIRECT_CANDIDATE_SOURCE,
-            'uses_precomputed_e5_results': False,
+            'candidate_source': e5_context['candidate_source'],
+            'uses_precomputed_e5_results': e5_context[
+                'uses_precomputed_results'
+            ],
+            'precomputed_e5_results_source': e5_context[
+                'precomputed_results_source'
+            ],
             'n': n,
             'topic_count': len(topics),
             'prompt_version': PROMPT_VERSION,
@@ -307,8 +332,9 @@ def build_report(
             ),
             'llama_per_news_inference_time': mean_time_summary(elapsed_times),
             'scope': (
-                'E5 se ejecuta una vez sobre todo test. Para cada N se mide '
-                'por separado la llamada HTTP y la inferencia de Llama.'
+                'El ranking E5 se obtiene una vez, por cálculo o desde un '
+                'informe validado. Para cada N se mide por separado la '
+                'llamada HTTP y la inferencia de Llama.'
             ),
         },
         'predictions': predictions,
@@ -342,7 +368,10 @@ def load_checkpoint(
             'este experimento.'
         )
     candidate_source = configuration.get('candidate_source')
-    if candidate_source == DIRECT_CANDIDATE_SOURCE:
+    if candidate_source in {
+        DIRECT_CANDIDATE_SOURCE,
+        PRECOMPUTED_CANDIDATE_SOURCE,
+    }:
         if (
             configuration.get('e5_ranking_sha256')
             != e5_context['ranking_sha256']
@@ -501,14 +530,41 @@ def main() -> None:
 
     print(f'Modelo E5: {args.e5_model}')
     print(f'Noticias: {len(test_records)}; valores N: {n_values}')
-    rankings, runtime = e5.compute_rankings(
-        test_records,
-        topics,
-        model_name=args.e5_model,
-        batch_size=args.e5_batch_size,
+    uses_precomputed_results = (
+        not args.recompute_e5 and args.e5_results.is_file()
     )
+    precomputed_results_source: Path | None = None
+    if uses_precomputed_results:
+        print(f'Validando ranking E5 Top-N: {args.e5_results.resolve()}')
+        rankings, runtime = e5.load_validated_rankings(
+            args.e5_results,
+            test_records,
+            labelled_by_id,
+            topics,
+            args.e5_model,
+            args.e5_batch_size,
+        )
+        precomputed_results_source = args.e5_results
+        candidate_source = PRECOMPUTED_CANDIDATE_SOURCE
+        runtime['timing']['scope'] = (
+            'Tiempos originales del informe E5 reutilizado; este baseline '
+            'no vuelve a ejecutar el modelo.'
+        )
+        print('Ranking validado; no se vuelve a cargar el modelo E5.')
+    else:
+        if not args.recompute_e5:
+            print(
+                f'No existe {args.e5_results}; se calculará el ranking E5.'
+            )
+        rankings, runtime = e5.compute_rankings(
+            test_records,
+            topics,
+            model_name=args.e5_model,
+            batch_size=args.e5_batch_size,
+        )
+        candidate_source = DIRECT_CANDIDATE_SOURCE
     device = runtime['device']
-    print(f'Dispositivo E5: {device}')
+    print(f'Dispositivo del ranking E5: {device}')
 
     normalized_labels = [
         {
@@ -529,6 +585,13 @@ def main() -> None:
         'labelled_test_sha256': e5.sha256_json(normalized_labels),
         'data_dir': str(args.data_dir.resolve()),
         'labelled_data_dir': str(args.labelled_data_dir.resolve()),
+        'candidate_source': candidate_source,
+        'uses_precomputed_results': uses_precomputed_results,
+        'precomputed_results_source': (
+            str(precomputed_results_source.resolve())
+            if precomputed_results_source is not None
+            else None
+        ),
     }
     records = prepare_records(rankings, labelled_by_id)
 

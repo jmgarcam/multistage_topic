@@ -65,6 +65,14 @@ def parse_args() -> argparse.Namespace:
         default=e5.DEFAULT_BATCH_SIZE,
         help='Número de textos codificados en cada lote.',
     )
+    parser.add_argument(
+        '--reuse-existing',
+        action='store_true',
+        help=(
+            'Si el informe de salida existe, lo valida y lo reutiliza sin '
+            'volver a cargar E5.'
+        ),
+    )
     return parser.parse_args()
 
 
@@ -214,6 +222,29 @@ def main() -> None:
 
     print(f'Modelo: {args.model}')
     print(f'Noticias: {len(records)}; temas por noticia: {len(topics)}')
+    if args.reuse_existing and args.output.is_file():
+        rankings, runtime = e5.load_validated_rankings(
+            args.output,
+            records,
+            labelled_by_id,
+            topics,
+            args.model,
+            args.batch_size,
+        )
+        hits = sum(
+            ranking['candidates'][0]['tema']
+            in labelled_by_id[ranking['_id']]['topics']
+            for ranking in rankings
+        )
+        total = len(rankings)
+        accuracy_percent = hits / total * 100 if total else 0.0
+        print(f'Dispositivo del informe existente: {runtime["device"]}')
+        print(f'Informe completo y validado: {args.output.resolve()}')
+        print(f'E5 Top-1: {hits}/{total} ({accuracy_percent:.2f}%)')
+        return
+    if args.reuse_existing:
+        print(f'No existe {args.output}; se calculará E5 Top-1.')
+
     rankings, runtime = e5.compute_rankings(
         records,
         topics,

@@ -84,6 +84,14 @@ def parse_args() -> argparse.Namespace:
         default=MAX_LENGTH,
         help='Longitud máxima de los pares tokenizados.',
     )
+    parser.add_argument(
+        '--reuse-existing',
+        action='store_true',
+        help=(
+            'Si el informe de salida existe, lo valida y lo reutiliza sin '
+            'volver a cargar BGE.'
+        ),
+    )
     return parser.parse_args()
 
 
@@ -218,6 +226,174 @@ def validate_dataset(
                 f'El texto de entrada no coincide con el ground truth para '
                 f'{news_id!r}.'
             )
+
+
+def load_validated_predictions(
+    path: Path,
+    records: list[dict[str, str]],
+    truth_by_id: dict[str, dict[str, Any]],
+    topics: dict[str, str],
+    model_name: str,
+    batch_size: int,
+    max_length: int,
+) -> tuple[list[dict[str, Any]], list[float], str]:
+    """Carga un ranking Top-1 completo solo si pertenece a este experimento."""
+    report = load_json(path)
+    if not isinstance(report, dict) or report.get('status') != 'complete':
+        raise SystemExit(f'{path} no contiene un informe BGE Top-1 completo.')
+
+    configuration = report.get('configuration')
+    if not isinstance(configuration, dict):
+        raise SystemExit(f'{path} no contiene una configuración válida.')
+
+    normalized_truth = [
+        {
+            '_id': news_id,
+            'text': truth['text'],
+            'topics': truth['topics'],
+        }
+        for news_id, truth in truth_by_id.items()
+    ]
+    expected_configuration = {
+        'model': model_name,
+        'candidate_source': 'full topic catalog',
+        'uses_e5_candidates': False,
+        'candidate_count': len(topics),
+        'batch_size': batch_size,
+        'max_length': max_length,
+        'score_normalization': True,
+        'topic_representation': TOPIC_TEMPLATE,
+        'input_data_sha256': sha256_json(records),
+        'topic_catalog_sha256': sha256_json(topics),
+        'ground_truth_sha256': sha256_json(normalized_truth),
+    }
+    mismatches = [
+        key
+        for key, expected_value in expected_configuration.items()
+        if configuration.get(key) != expected_value
+    ]
+    if mismatches:
+        raise SystemExit(
+            f'{path} no corresponde a los datos o parámetros actuales '
+            f'(campos distintos: {", ".join(mismatches)}).'
+        )
+
+    device = configuration.get('device')
+    if not isinstance(device, str) or not device:
+        raise SystemExit(f'{path}: dispositivo BGE inválido.')
+    saved_predictions = report.get('predictions')
+    if not isinstance(saved_predictions, list):
+        raise SystemExit(f'{path} no contiene una lista predictions.')
+    if len(saved_predictions) != len(records):
+        raise SystemExit(
+            f'{path} contiene {len(saved_predictions)} predicciones; '
+            f'se esperaban {len(records)}.'
+        )
+
+    by_id: dict[str, dict[str, Any]] = {}
+    for index, prediction in enumerate(saved_predictions):
+        location = f'{path}, predicción {index}'
+        if not isinstance(prediction, dict):
+            raise SystemExit(f'{location}: se esperaba un objeto JSON.')
+        news_id = prediction.get('_id')
+        if not isinstance(news_id, str) or not news_id or news_id in by_id:
+            raise SystemExit(f'{location}: _id ausente, inválido o duplicado.')
+        by_id[news_id] = prediction
+
+    expected_ids = {record['_id'] for record in records}
+    if set(by_id) != expected_ids:
+        raise SystemExit(
+            f'{path}: las predicciones no cubren exactamente data_test.'
+        )
+
+    topic_names = set(topics)
+    predictions: list[dict[str, Any]] = []
+    inference_times: list[float] = []
+    for record in records:
+        prediction = by_id[record['_id']]
+        location = f'{path}, predicción {record["_id"]!r}'
+        correct_topics = list(truth_by_id[record['_id']]['topics'])
+        if prediction.get('file') != record['file']:
+            raise SystemExit(f'{location}: el archivo de origen no coincide.')
+        if prediction.get('topics_correctos') != correct_topics:
+            raise SystemExit(f'{location}: las etiquetas no coinciden.')
+
+        saved_ranking = prediction.get('topic_scores')
+        if not isinstance(saved_ranking, list) or len(saved_ranking) != len(
+            topics
+        ):
+            raise SystemExit(f'{location}: ranking BGE incompleto.')
+        ranking: list[dict[str, Any]] = []
+        previous_score = math.inf
+        for candidate_index, candidate in enumerate(saved_ranking):
+            candidate_location = (
+                f'{location}, candidato {candidate_index}'
+            )
+            if not isinstance(candidate, dict):
+                raise SystemExit(
+                    f'{candidate_location}: se esperaba un objeto JSON.'
+                )
+            topic = candidate.get('tema')
+            score = candidate.get('cross_encoder_score')
+            if not isinstance(topic, str) or topic not in topic_names:
+                raise SystemExit(f'{candidate_location}: tema inválido.')
+            if (
+                isinstance(score, bool)
+                or not isinstance(score, Real)
+                or not math.isfinite(float(score))
+            ):
+                raise SystemExit(f'{candidate_location}: score inválido.')
+            numeric_score = float(score)
+            if numeric_score > previous_score:
+                raise SystemExit(
+                    f'{location}: el ranking no está ordenado por score.'
+                )
+            previous_score = numeric_score
+            ranking.append(
+                {'tema': topic, 'cross_encoder_score': numeric_score}
+            )
+        if {candidate['tema'] for candidate in ranking} != topic_names:
+            raise SystemExit(
+                f'{location}: el ranking no contiene exactamente el catálogo.'
+            )
+
+        winner = ranking[0]
+        if prediction.get('topic_predicho') != winner['tema']:
+            raise SystemExit(f'{location}: el ganador no coincide con el ranking.')
+        winner_score = prediction.get('cross_encoder_score')
+        if (
+            isinstance(winner_score, bool)
+            or not isinstance(winner_score, Real)
+            or float(winner_score) != winner['cross_encoder_score']
+        ):
+            raise SystemExit(f'{location}: el score ganador no coincide.')
+        expected_match = winner['tema'] in correct_topics
+        if prediction.get('match') is not expected_match:
+            raise SystemExit(f'{location}: el indicador match no coincide.')
+
+        elapsed = prediction.get('inference_time_seconds')
+        if (
+            isinstance(elapsed, bool)
+            or not isinstance(elapsed, Real)
+            or not math.isfinite(float(elapsed))
+            or elapsed < 0
+        ):
+            raise SystemExit(f'{location}: tiempo de inferencia inválido.')
+        numeric_elapsed = float(elapsed)
+        predictions.append(
+            {
+                '_id': record['_id'],
+                'file': record['file'],
+                'topics_correctos': correct_topics,
+                'topic_predicho': winner['tema'],
+                'cross_encoder_score': winner['cross_encoder_score'],
+                'topic_scores': ranking,
+                'inference_time_seconds': numeric_elapsed,
+                'match': expected_match,
+            }
+        )
+        inference_times.append(numeric_elapsed)
+    return predictions, inference_times, device
 
 
 def normalize_scores(raw_scores: Any, expected_count: int) -> list[float]:
@@ -483,10 +659,30 @@ def main() -> None:
     truth_by_id = load_ground_truth(args.labelled_data_dir, set(topics))
     validate_dataset(records, truth_by_id)
 
-    reranker, device, synchronize = load_reranker(args.model)
-    print(f'Dispositivo: {device}')
     print(f'Modelo: {args.model}')
     print(f'Noticias: {len(records)}; temas por noticia: {len(topics)}')
+    if args.reuse_existing and args.output.is_file():
+        predictions, _, device = load_validated_predictions(
+            args.output,
+            records,
+            truth_by_id,
+            topics,
+            args.model,
+            args.batch_size,
+            args.max_length,
+        )
+        hits = sum(prediction['match'] for prediction in predictions)
+        total = len(predictions)
+        accuracy_percent = hits / total * 100 if total else 0.0
+        print(f'Dispositivo del informe existente: {device}')
+        print(f'Informe completo y validado: {args.output.resolve()}')
+        print(f'BGE Top-1: {hits}/{total} ({accuracy_percent:.2f}%)')
+        return
+    if args.reuse_existing:
+        print(f'No existe {args.output}; se calculará BGE Top-1.')
+
+    reranker, device, synchronize = load_reranker(args.model)
+    print(f'Dispositivo: {device}')
 
     def score_pairs(pairs: list[list[str]]) -> Any:
         return reranker.compute_score(

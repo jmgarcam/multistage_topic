@@ -17,9 +17,16 @@ indicando valores concretos, por ejemplo:
 evaluation/E5_top_N_llama/run_e5_top_n_llama.sh 1 3 5 12
 ```
 
-E5 se ejecuta una sola vez y su ranking se reutiliza para todos los N de esa
-ejecución. No se leen `semantic_similarity_results` ni resultados de BGE. Las
-etiquetas de `data_test_labelled` se utilizan únicamente para métricas.
+El ranking completo de E5 Top-N se reutiliza para todos los N después de
+validar el modelo, los parámetros, los hashes de los datos y todas las
+predicciones. No se leen `semantic_similarity_results` ni resultados de BGE.
+Las etiquetas de `data_test_labelled` se utilizan únicamente para métricas.
+
+Para ignorar el informe de E5 Top-N y recalcular el ranking:
+
+```bash
+evaluation/E5_top_N_llama/run_e5_top_n_llama.sh --recompute-e5
+```
 
 
 ## Métricas
@@ -33,6 +40,6 @@ etiquetas de `data_test_labelled` se utilizan únicamente para métricas.
   de selección.
 
 
-El selector usa `llama3.2:3b` con el prompt v1 original. Los resultados 3B se
-guardan en `results_llama3_2_3b/`; los resultados anteriores de 1B permanecen
-en `results/`.
+El selector usa `llama3.1:8b` con el prompt v1 original. Los resultados 8B se
+guardan en `results_llama3_1_8b/`; los resultados anteriores permanecen en sus
+directorios originales.

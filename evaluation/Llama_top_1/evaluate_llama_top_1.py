@@ -20,7 +20,7 @@ EVALUATION_DIR = SCRIPT_DIR.parent
 PROJECT_DIR = EVALUATION_DIR.parent
 DATASET_DIR = PROJECT_DIR / 'dataset_mteb'
 DEFAULT_OUTPUT = (
-    SCRIPT_DIR / 'results_llama3_2_3b' / 'llama_top_1_results.json'
+    SCRIPT_DIR / 'results_llama3_1_8b' / 'llama_top_1_results.json'
 )
 DEFAULT_CHECKPOINT_EVERY = 10
 PROMPT_VERSION = 'mteb_forced_topic_selection_v1_all_topics_direct_v1'
@@ -42,7 +42,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--model',
-        default=os.environ.get('OLLAMA_MODEL', 'llama3.2:3b'),
+        default=os.environ.get('OLLAMA_MODEL', 'llama3.1:8b'),
         help='Modelo disponible en Ollama.',
     )
     parser.add_argument(

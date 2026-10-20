@@ -29,7 +29,7 @@ Los scripts resuelven sus rutas independientemente del directorio de trabajo y
 siguen leyendo y escribiendo los datos dentro de `dataset_mteb/`. La similitud
 genera `dataset_mteb/semantic_similarity_results/`; el reranker produce
 `dataset_mteb/reranked_topic_results.json`. Los evaluadores usan
-`llama3.2:3b` y obligan al modelo a seleccionar un tema candidato.
+`llama3.1:8b` y obligan al modelo a seleccionar un tema candidato.
 
 ## Evaluaciones auxiliares
 

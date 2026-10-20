@@ -4,6 +4,7 @@ set -uo pipefail
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 MAX_ATTEMPTS=${BASELINE_MAX_ATTEMPTS:-3}
 RETRY_DELAY_SECONDS=${BASELINE_RETRY_DELAY_SECONDS:-60}
+RESUME_RESULTS=${BASELINE_RESUME_RESULTS:-1}
 
 if ! [[ $MAX_ATTEMPTS =~ ^[1-9][0-9]*$ ]]; then
     printf 'BASELINE_MAX_ATTEMPTS debe ser un entero positivo.\n' >&2
@@ -11,6 +12,10 @@ if ! [[ $MAX_ATTEMPTS =~ ^[1-9][0-9]*$ ]]; then
 fi
 if ! [[ $RETRY_DELAY_SECONDS =~ ^[0-9]+$ ]]; then
     printf 'BASELINE_RETRY_DELAY_SECONDS debe ser un entero no negativo.\n' >&2
+    exit 2
+fi
+if ! [[ $RESUME_RESULTS =~ ^[01]$ ]]; then
+    printf 'BASELINE_RESUME_RESULTS debe valer 0 o 1.\n' >&2
     exit 2
 fi
 
@@ -51,22 +56,38 @@ for index in "${!BASELINE_SCRIPTS[@]}"; do
     fi
 done
 
+set_launcher_args() {
+    LAUNCHER_ARGS=()
+    if ((RESUME_RESULTS == 1)); then
+        case $1 in
+            e5_top_1|bge_top_1)
+                LAUNCHER_ARGS=(--reuse-existing)
+                ;;
+        esac
+    fi
+}
+
 if [[ ${1:-} == '--help' || ${1:-} == '-h' ]]; then
     printf '%s\n' \
         'Uso: evaluation/run_all_baselines.sh [--dry-run]' \
         'Ejecuta consecutivamente los siete baselines.' \
-        'Configurable con BASELINE_MAX_ATTEMPTS y' \
-        'BASELINE_RETRY_DELAY_SECONDS.'
+        'Configurable con BASELINE_MAX_ATTEMPTS,' \
+        'BASELINE_RETRY_DELAY_SECONDS y BASELINE_RESUME_RESULTS.'
     exit 0
 fi
 
 if [[ ${1:-} == '--dry-run' ]]; then
     printf 'Orden de ejecución (%d baselines):\n' "${#BASELINE_NAMES[@]}"
     for index in "${!BASELINE_NAMES[@]}"; do
-        printf '%d. %s -> %s\n' \
+        set_launcher_args "${BASELINE_SLUGS[$index]}"
+        printf '%d. %s -> %s' \
             "$((index + 1))" \
             "${BASELINE_NAMES[$index]}" \
             "${BASELINE_SCRIPTS[$index]}"
+        if ((${#LAUNCHER_ARGS[@]} > 0)); then
+            printf ' %s' "${LAUNCHER_ARGS[@]}"
+        fi
+        printf '\n'
     done
     exit 0
 fi
@@ -89,7 +110,8 @@ printf 'Inicio: %s\n' "$(date --iso-8601=seconds)"
 printf 'Directorio de logs: %s\n' "$LOG_DIR"
 printf 'Intentos máximos por baseline: %s\n' "$MAX_ATTEMPTS"
 printf 'Espera entre intentos: %s segundos\n' "$RETRY_DELAY_SECONDS"
-printf 'Modelo Ollama: %s\n' "${OLLAMA_MODEL:-llama3.2:3b}"
+printf 'Reutilizar resultados Top-1 validados: %s\n' "$RESUME_RESULTS"
+printf 'Modelo Ollama: %s\n' "${OLLAMA_MODEL:-llama3.1:8b}"
 
 RESULT_NAMES=()
 RESULT_STATUSES=()
@@ -100,6 +122,7 @@ for index in "${!BASELINE_NAMES[@]}"; do
     name=${BASELINE_NAMES[$index]}
     slug=${BASELINE_SLUGS[$index]}
     launcher=${BASELINE_SCRIPTS[$index]}
+    set_launcher_args "$slug"
     baseline_log=$LOG_DIR/${slug}.log
     start_epoch=$(date +%s)
     attempt=1
@@ -117,7 +140,7 @@ for index in "${!BASELINE_NAMES[@]}"; do
                 "$(date --iso-8601=seconds)" \
                 "$attempt" \
                 "$MAX_ATTEMPTS"
-            "$launcher"
+            "$launcher" "${LAUNCHER_ARGS[@]}"
         } 2>&1 | tee -a "$baseline_log"
         exit_code=${PIPESTATUS[0]}
 

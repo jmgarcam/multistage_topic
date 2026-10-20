@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 
 import calculate_top_1 as subject
 
@@ -67,6 +68,55 @@ class E5Top1Tests(unittest.TestCase):
 
         with self.assertRaisesRegex(SystemExit, 'no coincide'):
             subject.e5.validate_dataset(self.records, self.labelled)
+
+    def test_loads_only_a_complete_matching_e5_report(self) -> None:
+        rankings = subject.e5.rankings_from_similarity_rows(
+            self.records,
+            self.topics,
+            [[0.2, 0.9, 0.4]],
+        )
+        report = subject.build_report(
+            records=self.records,
+            labelled_by_id=self.labelled,
+            topics=self.topics,
+            rankings=rankings,
+            model_name=subject.e5.DEFAULT_MODEL,
+            batch_size=subject.e5.DEFAULT_BATCH_SIZE,
+            device='cuda',
+            timing={'total_e5_execution_time_seconds': 1.0},
+            data_dir=Path('data_test'),
+            labelled_data_dir=Path('data_test_labelled'),
+        )
+
+        with TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / 'e5_results.json'
+            subject.e5.save_json(path, report)
+            loaded, runtime = subject.e5.load_validated_rankings(
+                path,
+                self.records,
+                self.labelled,
+                self.topics,
+                subject.e5.DEFAULT_MODEL,
+                subject.e5.DEFAULT_BATCH_SIZE,
+            )
+
+            self.assertEqual(loaded, rankings)
+            self.assertEqual(runtime['device'], 'cuda')
+            self.assertEqual(
+                runtime['timing']['total_e5_execution_time_seconds'], 1.0
+            )
+
+            report['configuration']['topic_catalog_sha256'] = 'otro-catálogo'
+            subject.e5.save_json(path, report)
+            with self.assertRaisesRegex(SystemExit, 'topic_catalog_sha256'):
+                subject.e5.load_validated_rankings(
+                    path,
+                    self.records,
+                    self.labelled,
+                    self.topics,
+                    subject.e5.DEFAULT_MODEL,
+                    subject.e5.DEFAULT_BATCH_SIZE,
+                )
 
 
 if __name__ == '__main__':

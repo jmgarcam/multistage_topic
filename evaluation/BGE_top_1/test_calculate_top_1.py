@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Any
 
 import calculate_top_1 as subject
@@ -121,6 +122,59 @@ class BgeTop1Tests(unittest.TestCase):
 
         with self.assertRaisesRegex(SystemExit, '1 ausentes'):
             subject.validate_dataset(self.records, self.truth)
+
+    def test_loads_only_a_complete_matching_top_1_report(self) -> None:
+        predictions, elapsed = subject.evaluate_records(
+            self.records,
+            self.truth,
+            self.topics,
+            FakeScorer([0.2, 0.9, 0.4]),
+        )
+        report = subject.build_report(
+            records=self.records,
+            truth_by_id=self.truth,
+            topics=self.topics,
+            predictions=predictions,
+            inference_times=elapsed,
+            model_name=subject.MODEL_NAME,
+            batch_size=subject.BATCH_SIZE,
+            max_length=subject.MAX_LENGTH,
+            device='cuda:0',
+            data_dir=Path('data_test'),
+        )
+
+        with TemporaryDirectory() as temporary_directory:
+            path = Path(temporary_directory) / 'bge_top_1_results.json'
+            subject.save_json(path, report)
+            loaded, loaded_times, device = subject.load_validated_predictions(
+                path,
+                self.records,
+                self.truth,
+                self.topics,
+                subject.MODEL_NAME,
+                subject.BATCH_SIZE,
+                subject.MAX_LENGTH,
+            )
+
+            self.assertEqual(loaded, predictions)
+            self.assertEqual(
+                loaded_times,
+                [predictions[0]['inference_time_seconds']],
+            )
+            self.assertEqual(device, 'cuda:0')
+
+            report['configuration']['input_data_sha256'] = 'otro-dataset'
+            subject.save_json(path, report)
+            with self.assertRaisesRegex(SystemExit, 'input_data_sha256'):
+                subject.load_validated_predictions(
+                    path,
+                    self.records,
+                    self.truth,
+                    self.topics,
+                    subject.MODEL_NAME,
+                    subject.BATCH_SIZE,
+                    subject.MAX_LENGTH,
+                )
 
 
 if __name__ == '__main__':

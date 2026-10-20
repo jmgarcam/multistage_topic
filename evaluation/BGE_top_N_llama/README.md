@@ -18,10 +18,17 @@ indicando valores concretos:
 evaluation/BGE_top_N_llama/run_bge_top_n_llama.sh 1 3 5 12
 ```
 
-BGE se ejecuta una sola vez y su ranking se reutiliza para todos los N de esa
-ejecución. No se leen rankings de E5 ni resultados BGE precomputados. Las
-etiquetas de `data_test_labelled` se utilizan únicamente para métricas. Cada N
-se guarda como un checkpoint independiente dentro de `results_llama3_2_3b/`.
+BGE Top-1 se ejecuta una sola vez y su ranking completo se reutiliza para todos
+los N después de validar el modelo, los parámetros, los hashes de los datos y
+todas las predicciones. No se leen rankings de E5. Las etiquetas de
+`data_test_labelled` se utilizan únicamente para métricas. Cada N se guarda
+como un checkpoint independiente dentro de `results_llama3_1_8b/`.
+
+Para ignorar el informe de BGE Top-1 y recalcular el ranking:
+
+```bash
+evaluation/BGE_top_N_llama/run_bge_top_n_llama.sh --recompute-bge
+```
 
 
 ## Métricas
@@ -35,6 +42,6 @@ se guarda como un checkpoint independiente dentro de `results_llama3_2_3b/`.
   de selección.
 
 
-El selector usa `llama3.2:3b` con el prompt v1 original. Los resultados 3B se
-guardan en `results_llama3_2_3b/`; los resultados anteriores de 1B permanecen
-en `results/`.
+El selector usa `llama3.1:8b` con el prompt v1 original. Los resultados 8B se
+guardan en `results_llama3_1_8b/`; los resultados anteriores permanecen en sus
+directorios originales.

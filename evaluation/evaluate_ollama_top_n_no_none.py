@@ -17,7 +17,7 @@ from urllib.request import Request, urlopen
 
 
 DATASET_DIR = Path(__file__).resolve().parent.parent / 'dataset_mteb'
-MODEL_NAME = 'llama3.2:3b'
+MODEL_NAME = 'llama3.1:8b'
 MAX_NEW_TOKENS = 128
 VALIDITY_MAX_NEW_TOKENS = 512
 PREDICTION_FORMAT = 'structured JSON with one enum label'
@@ -29,7 +29,7 @@ OUTPUT_FILE = 'ollama_llama_3_2_3b_top_n_no_none_results.json'
 DECISION_FIELD = 'ollama_decision'
 RAW_OUTPUT_FIELD = 'ollama_raw_output'
 VALIDITY_RAW_OUTPUT_FIELD = 'ollama_validity_raw_output'
-MODEL_LABEL = 'Ollama llama3.2:3b'
+MODEL_LABEL = 'Ollama llama3.1:8b'
 DEFAULT_BASE_URL = 'http://localhost:11434'
 DEFAULT_TIMEOUT_SECONDS = 300.0
 NONE_TOPIC = 'ninguno'

@@ -79,6 +79,9 @@ class BgeTopNLlamaTests(unittest.TestCase):
             'input_data_sha256': 'input',
             'topic_catalog_sha256': 'topics',
             'labelled_test_sha256': 'labels',
+            'candidate_source': subject.DIRECT_CANDIDATE_SOURCE,
+            'uses_precomputed_results': False,
+            'precomputed_results_source': None,
             'timing': {},
         }
 

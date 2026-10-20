@@ -15,6 +15,9 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 EVALUATION_DIR = SCRIPT_DIR.parent
 PROJECT_DIR = EVALUATION_DIR.parent
 DATASET_DIR = PROJECT_DIR / 'dataset_mteb'
+DEFAULT_E5_RESULTS = (
+    EVALUATION_DIR / 'E5_top_1' / 'results' / 'e5_top_1_results.json'
+)
 DEFAULT_OUTPUT = SCRIPT_DIR / 'results' / 'e5_top_n_results.json'
 
 if str(EVALUATION_DIR) not in sys.path:
@@ -71,6 +74,20 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=e5.DEFAULT_BATCH_SIZE,
         help='Número de textos codificados en cada lote.',
+    )
+    parser.add_argument(
+        '--e5-results',
+        type=Path,
+        default=DEFAULT_E5_RESULTS,
+        help=(
+            'Informe E5 Top-1 cuyo ranking completo se reutiliza después '
+            'de validarlo.'
+        ),
+    )
+    parser.add_argument(
+        '--recompute-e5',
+        action='store_true',
+        help='Ignora el informe E5 Top-1 y vuelve a ejecutar el bi-encoder.',
     )
     return parser.parse_args()
 
@@ -216,6 +233,8 @@ def build_report(
     timing: dict[str, Any],
     data_dir: Path,
     labelled_data_dir: Path,
+    uses_precomputed_results: bool,
+    precomputed_results_source: Path | None,
 ) -> dict[str, Any]:
     normalized_labels = [
         {
@@ -235,8 +254,17 @@ def build_report(
         'configuration': {
             'model': model_name,
             'architecture': 'bi-encoder',
-            'candidate_source': 'full topic catalog scored directly by E5',
-            'uses_precomputed_results': False,
+            'candidate_source': (
+                'validated complete ranking from E5 Top-1 report'
+                if uses_precomputed_results
+                else 'full topic catalog scored directly by E5'
+            ),
+            'uses_precomputed_results': uses_precomputed_results,
+            'precomputed_results_source': (
+                str(precomputed_results_source.resolve())
+                if precomputed_results_source is not None
+                else None
+            ),
             'uses_bge': False,
             'uses_llama': False,
             'n_values': n_values,
@@ -330,12 +358,38 @@ def main() -> None:
 
     print(f'Modelo: {args.model}')
     print(f'Noticias: {len(records)}; N: {n_values}')
-    rankings, runtime = e5.compute_rankings(
-        records,
-        topics,
-        model_name=args.model,
-        batch_size=args.batch_size,
+    uses_precomputed_results = (
+        not args.recompute_e5 and args.e5_results.is_file()
     )
+    precomputed_results_source: Path | None = None
+    if uses_precomputed_results:
+        print(f'Validando ranking E5 Top-1: {args.e5_results.resolve()}')
+        rankings, runtime = e5.load_validated_rankings(
+            args.e5_results,
+            records,
+            labelled_by_id,
+            topics,
+            args.model,
+            args.batch_size,
+        )
+        precomputed_results_source = args.e5_results
+        runtime['timing']['scope'] = (
+            'Tiempos originales del informe E5 Top-1 reutilizado; este '
+            'baseline no vuelve a ejecutar el modelo.'
+        )
+        print('Ranking validado; no se vuelve a cargar el modelo E5.')
+    else:
+        if not args.recompute_e5:
+            print(
+                f'No existe {args.e5_results}; se calculará el ranking E5.'
+            )
+        rankings, runtime = e5.compute_rankings(
+            records,
+            topics,
+            model_name=args.model,
+            batch_size=args.batch_size,
+        )
+    print(f'Dispositivo del ranking E5: {runtime["device"]}')
     predictions = prepare_predictions(
         records, labelled_by_id, rankings, n_values, len(topics)
     )
@@ -352,6 +406,8 @@ def main() -> None:
         timing=runtime['timing'],
         data_dir=args.data_dir,
         labelled_data_dir=args.labelled_data_dir,
+        uses_precomputed_results=uses_precomputed_results,
+        precomputed_results_source=precomputed_results_source,
     )
     e5.save_json(args.output, report)
 

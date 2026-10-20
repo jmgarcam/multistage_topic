@@ -19,10 +19,16 @@ EVALUATION_DIR = SCRIPT_DIR.parent
 PROJECT_DIR = EVALUATION_DIR.parent
 DATASET_DIR = PROJECT_DIR / 'dataset_mteb'
 BGE_TOP_1_PATH = EVALUATION_DIR / 'BGE_top_1' / 'calculate_top_1.py'
-DEFAULT_RESULTS_DIR = SCRIPT_DIR / 'results_llama3_2_3b'
+DEFAULT_BGE_RESULTS = (
+    EVALUATION_DIR / 'BGE_top_1' / 'results' / 'bge_top_1_results.json'
+)
+DEFAULT_RESULTS_DIR = SCRIPT_DIR / 'results_llama3_1_8b'
 DEFAULT_CHECKPOINT_EVERY = 10
 PROMPT_VERSION = 'mteb_forced_topic_selection_v1_bge_top_n_v1'
-CANDIDATE_SOURCE = 'BGE computed directly from data_test'
+DIRECT_CANDIDATE_SOURCE = 'BGE computed directly from data_test'
+PRECOMPUTED_CANDIDATE_SOURCE = (
+    'validated complete ranking from BGE Top-1 report'
+)
 
 if str(EVALUATION_DIR) not in sys.path:
     sys.path.insert(0, str(EVALUATION_DIR))
@@ -63,7 +69,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--model',
-        default=os.environ.get('OLLAMA_MODEL', 'llama3.2:3b'),
+        default=os.environ.get('OLLAMA_MODEL', 'llama3.1:8b'),
         help='Modelo disponible en Ollama.',
     )
     parser.add_argument(
@@ -82,6 +88,20 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=bge.MAX_LENGTH,
         help='Longitud máxima de los pares tokenizados por BGE.',
+    )
+    parser.add_argument(
+        '--bge-results',
+        type=Path,
+        default=DEFAULT_BGE_RESULTS,
+        help=(
+            'Informe BGE Top-1 cuyo ranking completo se reutiliza después '
+            'de validarlo.'
+        ),
+    )
+    parser.add_argument(
+        '--recompute-bge',
+        action='store_true',
+        help='Ignora el informe BGE Top-1 y vuelve a ejecutar el reranker.',
     )
     parser.add_argument(
         '--data-dir',
@@ -261,8 +281,13 @@ def build_report(
             'bge_topic_representation': bge.TOPIC_TEMPLATE,
             'bge_ranking_sha256': bge_context['ranking_sha256'],
             'llama_model': base.MODEL_NAME,
-            'candidate_source': CANDIDATE_SOURCE,
-            'uses_precomputed_bge_results': False,
+            'candidate_source': bge_context['candidate_source'],
+            'uses_precomputed_bge_results': bge_context[
+                'uses_precomputed_results'
+            ],
+            'precomputed_bge_results_source': bge_context[
+                'precomputed_results_source'
+            ],
             'uses_e5_candidates': False,
             'n': n,
             'topic_count': len(topics),
@@ -342,8 +367,9 @@ def build_report(
             ),
             'llama_per_news_inference_time': mean_time_summary(elapsed_times),
             'scope': (
-                'BGE se ejecuta una vez sobre todo test. Para cada N se mide '
-                'por separado la llamada HTTP y la inferencia de Llama.'
+                'El ranking BGE se obtiene una vez, por cálculo o desde un '
+                'informe validado. Para cada N se mide por separado la '
+                'llamada HTTP y la inferencia de Llama.'
             ),
         },
         'predictions': predictions,
@@ -368,7 +394,6 @@ def load_checkpoint(
         'bge_max_length': bge_context['max_length'],
         'bge_ranking_sha256': bge_context['ranking_sha256'],
         'llama_model': base.MODEL_NAME,
-        'candidate_source': CANDIDATE_SOURCE,
         'n': n,
         'prompt_version': PROMPT_VERSION,
     }
@@ -529,26 +554,52 @@ def main() -> None:
     )
     bge.validate_dataset(test_records, labelled_by_id)
 
-    reranker, device, synchronize = bge.load_reranker(args.bge_model)
     print(f'Modelo BGE: {args.bge_model}')
-    print(f'Dispositivo BGE: {device}')
     print(f'Noticias: {len(test_records)}; valores N: {n_values}')
-
-    def score_pairs(pairs: list[list[str]]) -> Any:
-        return reranker.compute_score(
-            pairs,
-            batch_size=args.bge_batch_size,
-            max_length=args.bge_max_length,
-            normalize=True,
-        )
-
-    bge_predictions, inference_times = bge.evaluate_records(
-        test_records,
-        labelled_by_id,
-        topics,
-        score_pairs,
-        synchronize,
+    uses_precomputed_results = (
+        not args.recompute_bge and args.bge_results.is_file()
     )
+    precomputed_results_source: Path | None = None
+    if uses_precomputed_results:
+        print(f'Validando ranking BGE Top-1: {args.bge_results.resolve()}')
+        bge_predictions, inference_times, device = (
+            bge.load_validated_predictions(
+                args.bge_results,
+                test_records,
+                labelled_by_id,
+                topics,
+                args.bge_model,
+                args.bge_batch_size,
+                args.bge_max_length,
+            )
+        )
+        precomputed_results_source = args.bge_results
+        candidate_source = PRECOMPUTED_CANDIDATE_SOURCE
+        print('Ranking validado; no se vuelve a cargar el modelo BGE.')
+    else:
+        if not args.recompute_bge:
+            print(
+                f'No existe {args.bge_results}; se calculará el ranking BGE.'
+            )
+        reranker, device, synchronize = bge.load_reranker(args.bge_model)
+
+        def score_pairs(pairs: list[list[str]]) -> Any:
+            return reranker.compute_score(
+                pairs,
+                batch_size=args.bge_batch_size,
+                max_length=args.bge_max_length,
+                normalize=True,
+            )
+
+        bge_predictions, inference_times = bge.evaluate_records(
+            test_records,
+            labelled_by_id,
+            topics,
+            score_pairs,
+            synchronize,
+        )
+        candidate_source = DIRECT_CANDIDATE_SOURCE
+    print(f'Dispositivo del ranking BGE: {device}')
     records = prepare_records(test_records, bge_predictions)
     normalized_labels = [
         {
@@ -569,6 +620,13 @@ def main() -> None:
         'labelled_test_sha256': bge.sha256_json(normalized_labels),
         'data_dir': str(args.data_dir.resolve()),
         'labelled_data_dir': str(args.labelled_data_dir.resolve()),
+        'candidate_source': candidate_source,
+        'uses_precomputed_results': uses_precomputed_results,
+        'precomputed_results_source': (
+            str(precomputed_results_source.resolve())
+            if precomputed_results_source is not None
+            else None
+        ),
         'timing': {
             'total_cross_encoder_time_seconds': round(
                 sum(inference_times), 6
@@ -577,8 +635,11 @@ def main() -> None:
                 inference_times
             ),
             'scope': (
-                'Tiempo de compute_score para los pares de los 12 temas de '
-                'cada noticia, con sincronización CUDA cuando corresponde.'
+                'Tiempos originales del informe BGE Top-1 reutilizado.'
+                if uses_precomputed_results
+                else 'Tiempo de compute_score para los pares de los 12 '
+                'temas de cada noticia, con sincronización CUDA cuando '
+                'corresponde.'
             ),
         },
     }

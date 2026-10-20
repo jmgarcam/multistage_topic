@@ -7,6 +7,7 @@ import hashlib
 import json
 import math
 import time
+from numbers import Real
 from pathlib import Path
 from typing import Any
 
@@ -170,6 +171,151 @@ def validate_dataset(
                 'El texto de data_test no coincide con data_test_labelled '
                 f'para {news_id!r}.'
             )
+
+
+def load_validated_rankings(
+    path: Path,
+    records: list[dict[str, str]],
+    labelled_by_id: dict[str, dict[str, Any]],
+    topics: dict[str, str],
+    model_name: str,
+    batch_size: int,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Carga rankings completos solo si pertenecen al experimento actual."""
+    report = load_json(path)
+    if not isinstance(report, dict) or report.get('status') != 'complete':
+        raise SystemExit(f'{path} no contiene un informe E5 completo.')
+    configuration = report.get('configuration')
+    if not isinstance(configuration, dict):
+        raise SystemExit(f'{path} no contiene una configuración válida.')
+
+    normalized_labels = [
+        {
+            '_id': record['_id'],
+            'text': labelled_by_id[record['_id']]['text'],
+            'topics': labelled_by_id[record['_id']]['topics'],
+        }
+        for record in records
+    ]
+    expected_configuration = {
+        'model': model_name,
+        'architecture': 'bi-encoder',
+        'uses_bge': False,
+        'uses_llama': False,
+        'candidate_count': len(topics),
+        'batch_size': batch_size,
+        'normalize_embeddings': True,
+        'similarity': 'cosine',
+        'news_prefix': E5_PREFIX.strip(),
+        'topic_prefix': E5_PREFIX.strip(),
+        'topic_representation': TOPIC_TEMPLATE,
+        'input_data_sha256': sha256_json(records),
+        'topic_catalog_sha256': sha256_json(topics),
+        'labelled_test_sha256': sha256_json(normalized_labels),
+    }
+    mismatches = [
+        key
+        for key, expected_value in expected_configuration.items()
+        if configuration.get(key) != expected_value
+    ]
+    if mismatches:
+        raise SystemExit(
+            f'{path} no corresponde a los datos o parámetros actuales '
+            f'(campos distintos: {", ".join(mismatches)}).'
+        )
+
+    device = configuration.get('device')
+    if not isinstance(device, str) or not device:
+        raise SystemExit(f'{path}: dispositivo E5 inválido.')
+    timing = report.get('timing')
+    if not isinstance(timing, dict):
+        raise SystemExit(f'{path}: información de tiempos inválida.')
+    saved_predictions = report.get('predictions')
+    if not isinstance(saved_predictions, list):
+        raise SystemExit(f'{path} no contiene una lista predictions.')
+    if len(saved_predictions) != len(records):
+        raise SystemExit(
+            f'{path} contiene {len(saved_predictions)} predicciones; '
+            f'se esperaban {len(records)}.'
+        )
+
+    by_id: dict[str, dict[str, Any]] = {}
+    for index, prediction in enumerate(saved_predictions):
+        location = f'{path}, predicción {index}'
+        if not isinstance(prediction, dict):
+            raise SystemExit(f'{location}: se esperaba un objeto JSON.')
+        news_id = prediction.get('_id')
+        if not isinstance(news_id, str) or not news_id or news_id in by_id:
+            raise SystemExit(f'{location}: _id ausente, inválido o duplicado.')
+        by_id[news_id] = prediction
+    if set(by_id) != {record['_id'] for record in records}:
+        raise SystemExit(
+            f'{path}: las predicciones no cubren exactamente data_test.'
+        )
+
+    topic_names = set(topics)
+    rankings: list[dict[str, Any]] = []
+    for record in records:
+        prediction = by_id[record['_id']]
+        location = f'{path}, predicción {record["_id"]!r}'
+        if prediction.get('file') != record['file']:
+            raise SystemExit(f'{location}: el archivo de origen no coincide.')
+        correct_topics = list(labelled_by_id[record['_id']]['topics'])
+        if prediction.get('topics_correctos') != correct_topics:
+            raise SystemExit(f'{location}: las etiquetas no coinciden.')
+
+        saved_candidates = prediction.get('topic_scores')
+        if not isinstance(saved_candidates, list) or len(
+            saved_candidates
+        ) != len(topics):
+            raise SystemExit(f'{location}: ranking E5 incompleto.')
+        candidates: list[dict[str, Any]] = []
+        previous_similarity = math.inf
+        for candidate_index, candidate in enumerate(saved_candidates):
+            candidate_location = f'{location}, candidato {candidate_index}'
+            if not isinstance(candidate, dict):
+                raise SystemExit(
+                    f'{candidate_location}: se esperaba un objeto JSON.'
+                )
+            topic = candidate.get('tema')
+            similarity = candidate.get('similarity')
+            if not isinstance(topic, str) or topic not in topic_names:
+                raise SystemExit(f'{candidate_location}: tema inválido.')
+            if (
+                isinstance(similarity, bool)
+                or not isinstance(similarity, Real)
+                or not math.isfinite(float(similarity))
+            ):
+                raise SystemExit(
+                    f'{candidate_location}: similitud inválida.'
+                )
+            numeric_similarity = float(similarity)
+            if numeric_similarity > previous_similarity:
+                raise SystemExit(
+                    f'{location}: el ranking no está ordenado por similitud.'
+                )
+            previous_similarity = numeric_similarity
+            candidates.append(
+                {'tema': topic, 'similarity': numeric_similarity}
+            )
+        if {candidate['tema'] for candidate in candidates} != topic_names:
+            raise SystemExit(
+                f'{location}: el ranking no contiene exactamente el catálogo.'
+            )
+        rankings.append(
+            {
+                '_id': record['_id'],
+                'file': record['file'],
+                'text': record['text'],
+                'candidates': candidates,
+            }
+        )
+
+    saved_ranking_hash = configuration.get('e5_ranking_sha256')
+    calculated_ranking_hash = ranking_sha256(rankings)
+    if saved_ranking_hash != calculated_ranking_hash:
+        raise SystemExit(f'{path}: el hash del ranking E5 no coincide.')
+    return rankings, {'device': device, 'timing': dict(timing)}
 
 
 def topic_sentences(
