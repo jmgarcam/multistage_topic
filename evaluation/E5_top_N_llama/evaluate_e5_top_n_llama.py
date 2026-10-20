@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-'''Evalúa Llama con los Top-N candidatos producidos directamente por E5.'''
+'''Calcula E5 sobre test y evalúa Llama con cada Top-N posible.'''
 
 from __future__ import annotations
 
 import argparse
-import json
 import math
 import os
 import statistics
@@ -18,36 +17,73 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 EVALUATION_DIR = SCRIPT_DIR.parent
 PROJECT_DIR = EVALUATION_DIR.parent
 DATASET_DIR = PROJECT_DIR / 'dataset_mteb'
-RESULTS_DIR = SCRIPT_DIR / 'results'
-E5_MODEL_NAME = 'intfloat/multilingual-e5-base'
-DEFAULT_N_VALUES = list(range(2, 13))
+DEFAULT_RESULTS_DIR = SCRIPT_DIR / 'results_llama3_2_3b'
 DEFAULT_CHECKPOINT_EVERY = 10
 PROMPT_VERSION = 'mteb_forced_topic_selection_v1_e5_top_n_v1'
+DIRECT_CANDIDATE_SOURCE = 'E5 computed directly from data_test'
+LEGACY_CANDIDATE_SOURCE = 'E5 cosine-similarity ranking'
 
 if str(EVALUATION_DIR) not in sys.path:
     sys.path.insert(0, str(EVALUATION_DIR))
 
+import e5_topic_ranker as e5  # noqa: E402
 import evaluate_ollama_top_n_no_none as base  # noqa: E402
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            'Ejecuta Llama con los primeros N temas del ranking de similitud '
-            'E5. Sin valores N procesa del 2 al 12.'
+            'Calcula el ranking E5 directamente desde data_test y ejecuta '
+            'Llama con los primeros N temas. Sin valores N evalúa desde 1 '
+            'hasta el número total de temas.'
         )
     )
     parser.add_argument(
-        'n_values',
+        '--n_values',
         metavar='N',
         type=int,
         nargs='*',
-        help='Tamaños Top-N que se evaluarán (por defecto: 2..12).',
+        help='Tamaños Top-N; por defecto se evalúan todos los posibles.',
     )
     parser.add_argument(
         '--model',
-        default=os.environ.get('OLLAMA_MODEL', 'llama3.2:1b'),
+        default=os.environ.get('OLLAMA_MODEL', 'llama3.2:3b'),
         help='Modelo disponible en Ollama.',
+    )
+    parser.add_argument(
+        '--e5-model',
+        default=e5.DEFAULT_MODEL,
+        help='Modelo bi-encoder usado para generar los candidatos.',
+    )
+    parser.add_argument(
+        '--e5-batch-size',
+        type=int,
+        default=e5.DEFAULT_BATCH_SIZE,
+        help='Número de textos codificados por lote con E5.',
+    )
+    parser.add_argument(
+        '--data-dir',
+        type=Path,
+        default=DATASET_DIR / 'data_test',
+        help='Directorio con las noticias de test.',
+    )
+    parser.add_argument(
+        '--labelled-data-dir',
+        type=Path,
+        default=DATASET_DIR / 'data_test_labelled',
+        help='Copia etiquetada de test, usada únicamente para métricas.',
+    )
+    parser.add_argument(
+        '--topics',
+        type=Path,
+        default=DATASET_DIR / 'temas.json',
+        help='Catálogo completo de temas y definiciones.',
+    )
+    parser.add_argument(
+        '--results-dir',
+        type=Path,
+        default=DEFAULT_RESULTS_DIR,
+        help='Directorio de informes y checkpoints por valor de N.',
     )
     parser.add_argument(
         '--checkpoint-every',
@@ -58,103 +94,33 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def load_json(path: Path) -> Any:
-    try:
-        with path.open('r', encoding='utf-8') as file_handle:
-            return json.load(file_handle)
-    except FileNotFoundError as exc:
-        raise SystemExit(f'No se encontró el archivo: {path}') from exc
-    except json.JSONDecodeError as exc:
-        raise SystemExit(f'JSON no válido en {path}: {exc}') from exc
+def resolve_n_values(requested: list[int], topic_count: int) -> list[int]:
+    n_values = requested or list(range(1, topic_count + 1))
+    if n_values != sorted(set(n_values)):
+        raise SystemExit('Los valores N deben estar ordenados y no repetirse.')
+    if any(n < 1 or n > topic_count for n in n_values):
+        raise SystemExit(f'N debe estar entre 1 y {topic_count}.')
+    return n_values
 
 
-def save_json(path: Path, payload: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary_path = path.with_suffix(path.suffix + '.tmp')
-    with temporary_path.open('w', encoding='utf-8') as file_handle:
-        json.dump(payload, file_handle, ensure_ascii=False, indent=2)
-        file_handle.write('\n')
-    temporary_path.replace(path)
-
-
-def load_records(
-    topics: dict[str, str], truth_by_id: dict[str, list[str] | None]
+def prepare_records(
+    rankings: list[dict[str, Any]],
+    labelled_by_id: dict[str, dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    input_dir = DATASET_DIR / 'semantic_similarity_results'
-    input_paths = sorted(input_dir.glob('*.json'))
-    if not input_paths:
-        raise SystemExit(f'No se encontraron resultados E5 en {input_dir}.')
-
-    topic_count = len(topics)
-    top_key = f'top_{topic_count}'
     records: list[dict[str, Any]] = []
-    seen_ids: set[str] = set()
-
-    for input_path in input_paths:
-        payload = load_json(input_path)
-        if not isinstance(payload, list):
-            raise SystemExit(f'{input_path} debe contener una lista JSON.')
-        for record_index, record in enumerate(payload):
-            location = f'{input_path}, elemento {record_index}'
-            if not isinstance(record, dict):
-                raise SystemExit(f'{location}: se esperaba un objeto JSON.')
-            news_id = base.required_string(record, '_id', location)
-            if news_id in seen_ids:
-                raise SystemExit(f'{location}: _id duplicado {news_id!r}.')
-            seen_ids.add(news_id)
-            if news_id not in truth_by_id:
-                continue
-
-            source_file = base.required_string(record, 'file', location)
-            text = base.required_string(record, 'text', location)
-            candidates = record.get(top_key)
-            if not isinstance(candidates, list) or len(candidates) != topic_count:
-                raise SystemExit(
-                    f'{location}: {top_key} debe contener {topic_count} temas.'
-                )
-
-            prepared_candidates: list[dict[str, str]] = []
-            seen_topics: set[str] = set()
-            for candidate_index, candidate in enumerate(candidates):
-                candidate_location = f'{location}, candidato {candidate_index}'
-                if not isinstance(candidate, dict):
-                    raise SystemExit(
-                        f'{candidate_location}: se esperaba un objeto JSON.'
-                    )
-                topic = base.required_string(
-                    candidate, 'tema', candidate_location
-                )
-                if topic not in topics or topic in seen_topics:
-                    raise SystemExit(
-                        f'{candidate_location}: tema desconocido o duplicado '
-                        f'{topic!r}.'
-                    )
-                seen_topics.add(topic)
-                prepared_candidates.append({'tema': topic})
-            if seen_topics != set(topics):
-                raise SystemExit(
-                    f'{location}: {top_key} no contiene todo el catálogo.'
-                )
-
-            correct_topics = truth_by_id[news_id]
-            if correct_topics is None:
-                raise SystemExit(
-                    f'{location}: el dataset MTEB no admite "ninguno".'
-                )
-            records.append(
-                {
-                    '_id': news_id,
-                    'file': source_file,
-                    'text': text,
-                    'topics_correctos': correct_topics,
-                    'candidates': prepared_candidates,
-                }
-            )
-
-    missing_ids = set(truth_by_id) - seen_ids
-    if missing_ids:
-        raise SystemExit(
-            f'Faltan resultados E5 para {len(missing_ids)} noticias.'
+    for ranking in rankings:
+        news_id = ranking['_id']
+        labelled = labelled_by_id[news_id]
+        records.append(
+            {
+                '_id': news_id,
+                'file': ranking['file'],
+                'text': ranking['text'],
+                'topics_correctos': list(labelled['topics']),
+                'candidates': [
+                    dict(candidate) for candidate in ranking['candidates']
+                ],
+            }
         )
     return records
 
@@ -187,27 +153,22 @@ def wilson_interval(hits: int, total: int) -> dict[str, Any] | None:
 
 def mean_time_summary(elapsed_times: list[float]) -> dict[str, Any]:
     sample_size = len(elapsed_times)
-    if sample_size:
-        mean = statistics.fmean(elapsed_times)
-        if sample_size > 1:
-            margin = (
-                1.959963984540054
-                * statistics.stdev(elapsed_times)
-                / math.sqrt(sample_size)
-            )
-        else:
-            margin = 0.0
-        interval = {
-            'lower': round(max(0.0, mean - margin), 6),
-            'upper': round(mean + margin, 6),
-        }
+    mean = statistics.fmean(elapsed_times) if elapsed_times else 0.0
+    if sample_size > 1:
+        margin = (
+            1.959963984540054
+            * statistics.stdev(elapsed_times)
+            / math.sqrt(sample_size)
+        )
     else:
-        mean = 0.0
-        interval = {'lower': 0.0, 'upper': 0.0}
+        margin = 0.0
     return {
         'sample_size': sample_size,
         'mean_seconds': round(mean, 6),
-        'confidence_interval_95_seconds': interval,
+        'confidence_interval_95_seconds': {
+            'lower': round(max(0.0, mean - margin), 6),
+            'upper': round(mean + margin, 6),
+        },
         'method': 'Normal approximation for the sample mean',
     }
 
@@ -217,10 +178,29 @@ def build_report(
     predictions: list[dict[str, Any]],
     topics: dict[str, str],
     n: int,
+    e5_context: dict[str, Any],
 ) -> dict[str, Any]:
-    hits = sum(prediction['matches_real_topic'] for prediction in predictions)
+    llama_final_hits = sum(
+        prediction['matches_real_topic'] for prediction in predictions
+    )
     evaluated = len(predictions)
-    accuracy = hits / evaluated if evaluated else 0.0
+    llama_final_accuracy = (
+        llama_final_hits / evaluated if evaluated else 0.0
+    )
+    available = sum(
+        prediction['candidate_contains_real_topic']
+        for prediction in predictions
+    )
+    conditional_selection_accuracy = (
+        llama_final_hits / available if available else 0.0
+    )
+    retriever_top_1_hits = sum(
+        record['candidates'][0]['tema'] in record['topics_correctos']
+        for record in records
+    )
+    retriever_top_1_accuracy = (
+        retriever_top_1_hits / len(records) if records else 0.0
+    )
     candidate_recall_hits = sum(
         any(
             topic in {candidate['tema'] for candidate in record['candidates'][:n]}
@@ -230,21 +210,56 @@ def build_report(
     )
     candidate_recall = candidate_recall_hits / len(records) if records else 0.0
     elapsed_times = [
-        float(prediction['inference_time_seconds']) for prediction in predictions
+        float(prediction['inference_time_seconds'])
+        for prediction in predictions
     ]
     return {
         'status': 'complete' if evaluated == len(records) else 'in_progress',
         'configuration': {
-            'e5_model': E5_MODEL_NAME,
+            'e5_model': e5_context['model'],
+            'e5_architecture': 'bi-encoder',
+            'e5_batch_size': e5_context['batch_size'],
+            'e5_device': e5_context['device'],
+            'e5_normalize_embeddings': True,
+            'e5_similarity': 'cosine',
+            'e5_news_prefix': e5.E5_PREFIX.strip(),
+            'e5_topic_prefix': e5.E5_PREFIX.strip(),
+            'e5_topic_representation': e5.TOPIC_TEMPLATE,
+            'e5_ranking_sha256': e5_context['ranking_sha256'],
             'llama_model': base.MODEL_NAME,
-            'candidate_source': 'E5 cosine-similarity ranking',
+            'candidate_source': DIRECT_CANDIDATE_SOURCE,
+            'uses_precomputed_e5_results': False,
             'n': n,
             'topic_count': len(topics),
             'prompt_version': PROMPT_VERSION,
             'decision_strategy': 'forced_topic_selection',
             'prediction_format': base.PREDICTION_FORMAT,
             'generation': 'Ollama API (temperature=0, seed=0)',
+            'metric_definitions': {
+                'retriever_top_1_accuracy': (
+                    'fraction of news whose highest-scoring retriever topic '
+                    'is correct; equal to micro-precision for this dataset'
+                ),
+                'candidate_recall_at_n': (
+                    'fraction of news with the correct topic among the N '
+                    'candidates sent to Llama'
+                ),
+                'llama_final_accuracy': (
+                    'fraction of final Llama decisions matching the correct '
+                    'topic'
+                ),
+                'conditional_selection_accuracy': (
+                    'Llama accuracy restricted to news where the correct '
+                    'topic was available among the candidates'
+                ),
+            },
             'api_base_url': base.get_base_url(),
+            'data_dir': e5_context['data_dir'],
+            'labelled_data_dir': e5_context['labelled_data_dir'],
+            'labels_used_for': 'metrics only',
+            'input_data_sha256': e5_context['input_data_sha256'],
+            'topic_catalog_sha256': e5_context['topic_catalog_sha256'],
+            'labelled_test_sha256': e5_context['labelled_test_sha256'],
         },
         'dataset': {
             'total_news': len(records),
@@ -253,23 +268,47 @@ def build_report(
         },
         'metrics': {
             'evaluated_news': evaluated,
-            'top_1_hits': hits,
-            'top_1_misses': evaluated - hits,
-            'top_1_accuracy_mean': round(accuracy, 6),
-            'top_1_accuracy_mean_percent': round(accuracy * 100, 2),
-            'top_1_accuracy_confidence_interval_95': wilson_interval(
-                hits, evaluated
+            'retriever_top_1_hits': retriever_top_1_hits,
+            'retriever_top_1_misses': len(records) - retriever_top_1_hits,
+            'retriever_top_1_accuracy': round(
+                retriever_top_1_accuracy, 6
             ),
-            'candidate_recall_hits': candidate_recall_hits,
-            'candidate_recall': round(candidate_recall, 6),
-            'candidate_recall_percent': round(candidate_recall * 100, 2),
+            'retriever_top_1_accuracy_percent': round(
+                retriever_top_1_accuracy * 100, 2
+            ),
+            'llama_final_hits': llama_final_hits,
+            'llama_final_misses': evaluated - llama_final_hits,
+            'llama_final_accuracy': round(llama_final_accuracy, 6),
+            'llama_final_accuracy_percent': round(
+                llama_final_accuracy * 100, 2
+            ),
+            'llama_final_accuracy_confidence_interval_95': wilson_interval(
+                llama_final_hits, evaluated
+            ),
+            'candidate_recall_at_n_hits': candidate_recall_hits,
+            'candidate_recall_at_n': round(candidate_recall, 6),
+            'candidate_recall_at_n_percent': round(
+                candidate_recall * 100, 2
+            ),
+            'retrieval_errors': evaluated - available,
+            'selection_opportunities': available,
+            'selection_errors': available - llama_final_hits,
+            'conditional_selection_accuracy': round(
+                conditional_selection_accuracy, 6
+            ),
+            'conditional_selection_accuracy_percent': round(
+                conditional_selection_accuracy * 100, 2
+            ),
         },
         'timing': {
-            'total_inference_time_seconds': round(sum(elapsed_times), 6),
-            'per_news_inference_time': mean_time_summary(elapsed_times),
+            'e5_ranking': e5_context['timing'],
+            'llama_total_inference_time_seconds': round(
+                sum(elapsed_times), 6
+            ),
+            'llama_per_news_inference_time': mean_time_summary(elapsed_times),
             'scope': (
-                'Tiempo medido alrededor de cada selección mediante la API '
-                'de Ollama; incluye la llamada HTTP y la inferencia.'
+                'E5 se ejecuta una vez sobre todo test. Para cada N se mide '
+                'por separado la llamada HTTP y la inferencia de Llama.'
             ),
         },
         'predictions': predictions,
@@ -280,27 +319,40 @@ def load_checkpoint(
     path: Path,
     records: list[dict[str, Any]],
     n: int,
+    e5_context: dict[str, Any],
 ) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
-    report = load_json(path)
+    report = e5.load_json(path)
     if not isinstance(report, dict):
         raise SystemExit(f'Checkpoint no válido: {path}')
     configuration = report.get('configuration')
-    expected = {
-        'e5_model': E5_MODEL_NAME,
+    common_expected = {
+        'e5_model': e5_context['model'],
         'llama_model': base.MODEL_NAME,
-        'candidate_source': 'E5 cosine-similarity ranking',
         'n': n,
         'prompt_version': PROMPT_VERSION,
     }
     if not isinstance(configuration, dict) or any(
-        configuration.get(key) != value for key, value in expected.items()
+        configuration.get(key) != value
+        for key, value in common_expected.items()
     ):
         raise SystemExit(
             f'{path} usa otra configuración. Muévelo antes de ejecutar '
             'este experimento.'
         )
+    candidate_source = configuration.get('candidate_source')
+    if candidate_source == DIRECT_CANDIDATE_SOURCE:
+        if (
+            configuration.get('e5_ranking_sha256')
+            != e5_context['ranking_sha256']
+            or configuration.get('e5_batch_size')
+            != e5_context['batch_size']
+        ):
+            raise SystemExit(f'{path} usa otro ranking o configuración E5.')
+    elif candidate_source != LEGACY_CANDIDATE_SOURCE:
+        raise SystemExit(f'{path} tiene una fuente de candidatos desconocida.')
+
     predictions = report.get('predictions')
     if not isinstance(predictions, list):
         raise SystemExit(f'{path} no contiene una lista predictions.')
@@ -316,13 +368,15 @@ def load_checkpoint(
             raise SystemExit(f'{location}: _id desconocido o duplicado.')
         seen_ids.add(news_id)
         record = records_by_id[news_id]
-        candidate_names = [
-            candidate['tema'] for candidate in record['candidates'][:n]
-        ]
+        candidates = record['candidates'][:n]
+        candidate_names = [candidate['tema'] for candidate in candidates]
         if prediction.get('n') != n or prediction.get(
             'candidate_topics'
         ) != candidate_names:
-            raise SystemExit(f'{location}: candidatos inconsistentes.')
+            raise SystemExit(
+                f'{location}: los candidatos guardados no coinciden con '
+                'el ranking E5 calculado directamente.'
+            )
         decision = base.validate_saved_decision(
             prediction.get(base.DECISION_FIELD), candidate_names, location
         )
@@ -330,7 +384,9 @@ def load_checkpoint(
         base.validate_prediction_outputs(
             prediction, candidate_names, decision, location
         )
+        prediction['file'] = record['file']
         prediction['topics_correctos'] = list(record['topics_correctos'])
+        prediction['candidate_scores'] = [dict(candidate) for candidate in candidates]
         prediction['candidate_contains_real_topic'] = any(
             topic in candidate_names for topic in record['topics_correctos']
         )
@@ -354,24 +410,25 @@ def evaluate_n(
     n: int,
     checkpoint_every: int,
     client_holder: list[base.OllamaClient],
+    results_dir: Path,
+    e5_context: dict[str, Any],
 ) -> None:
-    output_path = RESULTS_DIR / f'e5_top_{n}_llama_results.json'
-    predictions = load_checkpoint(output_path, records, n)
+    output_path = results_dir / f'e5_top_{n}_llama_results.json'
+    predictions = load_checkpoint(output_path, records, n, e5_context)
     completed_ids = {prediction['_id'] for prediction in predictions}
     pending = [record for record in records if record['_id'] not in completed_ids]
     order = {record['_id']: index for index, record in enumerate(records)}
 
     def checkpoint() -> dict[str, Any]:
         predictions.sort(key=lambda prediction: order[prediction['_id']])
-        report = build_report(records, predictions, topics, n)
-        save_json(output_path, report)
+        report = build_report(records, predictions, topics, n, e5_context)
+        e5.save_json(output_path, report)
         return report
 
     if not pending:
         report = checkpoint()
-        print(
-            f"N={n}: completo, {report['metrics']['top_1_accuracy_mean_percent']:.2f}%"
-        )
+        accuracy = report['metrics']['llama_final_accuracy_percent']
+        print(f'N={n}: completo, {accuracy:.2f}%')
         return
 
     if not client_holder:
@@ -396,6 +453,9 @@ def evaluate_n(
                     'topics_correctos': record['topics_correctos'],
                     'n': n,
                     'candidate_topics': candidate_names,
+                    'candidate_scores': [
+                        dict(candidate) for candidate in candidates
+                    ],
                     'candidate_contains_real_topic': any(
                         topic in candidate_names
                         for topic in record['topics_correctos']
@@ -420,33 +480,62 @@ def evaluate_n(
         raise
 
     report = checkpoint()
-    print(
-        f"N={n}: completo, {report['metrics']['top_1_accuracy_mean_percent']:.2f}%"
-    )
+    accuracy = report['metrics']['llama_final_accuracy_percent']
+    print(f'N={n}: completo, {accuracy:.2f}%')
 
 
 def main() -> None:
     args = parse_args()
     if args.checkpoint_every < 1:
         raise SystemExit('--checkpoint-every debe ser mayor que cero.')
+    if args.e5_batch_size < 1:
+        raise SystemExit('--e5-batch-size debe ser mayor que cero.')
 
-    topics = base.load_temas(DATASET_DIR / 'temas.json')
-    n_values = args.n_values or DEFAULT_N_VALUES
-    if n_values != sorted(set(n_values)):
-        raise SystemExit('Los valores N deben estar ordenados y no repetirse.')
-    if any(n < 1 or n > len(topics) for n in n_values):
-        raise SystemExit(f'N debe estar entre 1 y {len(topics)}.')
+    topics = e5.load_topics(args.topics)
+    n_values = resolve_n_values(args.n_values, len(topics))
+    test_records = e5.load_test_records(args.data_dir)
+    labelled_by_id = e5.load_labelled_test(
+        args.labelled_data_dir, set(topics)
+    )
+    e5.validate_dataset(test_records, labelled_by_id)
+
+    print(f'Modelo E5: {args.e5_model}')
+    print(f'Noticias: {len(test_records)}; valores N: {n_values}')
+    rankings, runtime = e5.compute_rankings(
+        test_records,
+        topics,
+        model_name=args.e5_model,
+        batch_size=args.e5_batch_size,
+    )
+    device = runtime['device']
+    print(f'Dispositivo E5: {device}')
+
+    normalized_labels = [
+        {
+            '_id': record['_id'],
+            'text': labelled_by_id[record['_id']]['text'],
+            'topics': labelled_by_id[record['_id']]['topics'],
+        }
+        for record in test_records
+    ]
+    e5_context = {
+        'model': args.e5_model,
+        'batch_size': args.e5_batch_size,
+        'device': device,
+        'timing': runtime['timing'],
+        'ranking_sha256': e5.ranking_sha256(rankings),
+        'input_data_sha256': e5.sha256_json(test_records),
+        'topic_catalog_sha256': e5.sha256_json(topics),
+        'labelled_test_sha256': e5.sha256_json(normalized_labels),
+        'data_dir': str(args.data_dir.resolve()),
+        'labelled_data_dir': str(args.labelled_data_dir.resolve()),
+    }
+    records = prepare_records(rankings, labelled_by_id)
 
     base.MODEL_NAME = args.model
     base.MODEL_LABEL = f'Ollama {args.model}'
     base.ALLOW_NONE_DECISION = False
     base.PROMPT_VERSION = 'mteb_forced_topic_selection_v1'
-
-    truth = base.load_ground_truth(
-        DATASET_DIR / 'data_validation', set(topics)
-    )
-    records = load_records(topics, truth)
-    print(f'Noticias: {len(records)}; valores N: {n_values}')
 
     client_holder: list[base.OllamaClient] = []
     for n in n_values:
@@ -456,6 +545,8 @@ def main() -> None:
             n,
             args.checkpoint_every,
             client_holder,
+            args.results_dir,
+            e5_context,
         )
 
 

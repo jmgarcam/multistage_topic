@@ -23,7 +23,7 @@ VALIDITY_MAX_NEW_TOKENS = 512
 PREDICTION_FORMAT = 'structured JSON with one enum label'
 PROMPT_VERSION = 'mteb_forced_topic_selection_v1'
 RERANK_RESULTS_FILE = 'reranked_topic_results.json'
-VALIDATION_DIR = 'data_validation'
+LABELLED_TEST_DIR = 'data_test_labelled'
 TOPICS_FILE = 'temas.json'
 OUTPUT_FILE = 'ollama_llama_3_2_3b_top_n_no_none_results.json'
 DECISION_FIELD = 'ollama_decision'
@@ -940,7 +940,7 @@ def build_report(
             'k': K,
             'n_values': N_VALUES,
             'none_ground_truth_excluded': False,
-            'ground_truth_source': 'data_validation',
+            'ground_truth_source': 'data_test_labelled',
             'prediction_format': PREDICTION_FORMAT,
             'multi_topic_match': 'any',
             'generation': 'Ollama API (temperature=0, seed=0)',
@@ -1097,7 +1097,7 @@ def main() -> None:
 
     topics = load_temas(resolve_path(TOPICS_FILE))
     truth_by_id = load_ground_truth(
-        resolve_path(VALIDATION_DIR), set(topics)
+        resolve_path(LABELLED_TEST_DIR), set(topics)
     )
     records = prepare_records(
         load_json(resolve_path(RERANK_RESULTS_FILE)),

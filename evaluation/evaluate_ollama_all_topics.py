@@ -15,7 +15,7 @@ import evaluate_ollama_top_n_no_none as base
 
 DATASET_DIR = Path(__file__).resolve().parent.parent / 'dataset_mteb'
 SOURCE_RESULTS_FILE = 'reranked_topic_results.json'
-VALIDATION_DIR = 'data_validation'
+LABELLED_TEST_DIR = 'data_test_labelled'
 TOPICS_FILE = 'temas.json'
 OUTPUT_FILE = 'ollama_llama_3_2_3b_all_topics_no_none_results.json'
 PROMPT_VERSION = f'{base.PROMPT_VERSION}_all_topics_v1'
@@ -203,7 +203,7 @@ def build_report(
             'candidate_mode': CANDIDATE_MODE,
             'topic_count': len(topic_names),
             'none_ground_truth_excluded': False,
-            'ground_truth_source': 'data_validation',
+            'ground_truth_source': 'data_test_labelled',
             'prediction_format': base.PREDICTION_FORMAT,
             'multi_topic_match': 'any',
             'generation': 'Ollama API (temperature=0, seed=0)',
@@ -276,7 +276,7 @@ def main() -> None:
     topics = base.load_temas(resolve_path(TOPICS_FILE))
     topic_names = list(topics)
     truth_by_id = base.load_ground_truth(
-        resolve_path(VALIDATION_DIR), set(topic_names)
+        resolve_path(LABELLED_TEST_DIR), set(topic_names)
     )
     records = prepare_records(
         base.load_json(resolve_path(SOURCE_RESULTS_FILE)), truth_by_id, topics

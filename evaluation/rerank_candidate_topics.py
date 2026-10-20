@@ -14,7 +14,7 @@ from typing import Any
 INPUT_DIR = 'semantic_similarity_results'
 TEMAS_JSON = 'temas.json'
 OUTPUT_FILE = 'reranked_topic_results.json'
-K_VALUES = [3, 5, 7, 10, 13, 15, 19]
+K_VALUES = [3, 5, 7, 10, 12]
 MODEL_NAME = 'BAAI/bge-reranker-v2-m3'
 BATCH_SIZE = 16
 MAX_LENGTH = 512
