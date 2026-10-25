@@ -1,0 +1,65 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1400" height="890" viewBox="0 0 1400 890" role="img" aria-labelledby="title description">
+<title id="title">Número de noticias por categoría</title>
+<desc id="description">Gráfica de barras horizontal con el número de noticias asignadas a cada categoría.</desc>
+<rect width="100%" height="100%" fill="#f8fafc"/>
+<text x="56" y="67" fill="#0f172a" font-family="Arial, Helvetica, sans-serif" font-size="34" font-weight="700">Número de noticias por categoría</text>
+<text x="56" y="105" fill="#475569" font-family="Arial, Helvetica, sans-serif" font-size="19">822 noticias · 858 asignaciones · 36 noticias multietiqueta</text>
+<text x="56" y="136" fill="#64748b" font-family="Arial, Helvetica, sans-serif" font-size="16">Las noticias multietiqueta cuentan una vez en cada categoría asignada.</text>
+<line x1="420.0" y1="163" x2="420.0" y2="798" stroke="#dbe3ee" stroke-width="1"/>
+<text x="420.0" y="151" text-anchor="middle" fill="#64748b" font-family="Arial, Helvetica, sans-serif" font-size="15">0</text>
+<line x1="633.8" y1="163" x2="633.8" y2="798" stroke="#dbe3ee" stroke-width="1"/>
+<text x="633.8" y="151" text-anchor="middle" fill="#64748b" font-family="Arial, Helvetica, sans-serif" font-size="15">50</text>
+<line x1="847.5" y1="163" x2="847.5" y2="798" stroke="#dbe3ee" stroke-width="1"/>
+<text x="847.5" y="151" text-anchor="middle" fill="#64748b" font-family="Arial, Helvetica, sans-serif" font-size="15">100</text>
+<line x1="1061.2" y1="163" x2="1061.2" y2="798" stroke="#dbe3ee" stroke-width="1"/>
+<text x="1061.2" y="151" text-anchor="middle" fill="#64748b" font-family="Arial, Helvetica, sans-serif" font-size="15">150</text>
+<line x1="1275.0" y1="163" x2="1275.0" y2="798" stroke="#dbe3ee" stroke-width="1"/>
+<text x="1275.0" y="151" text-anchor="middle" fill="#64748b" font-family="Arial, Helvetica, sans-serif" font-size="15">200</text>
+<text x="402" y="196.5" text-anchor="end" fill="#1e293b" font-family="Arial, Helvetica, sans-serif" font-size="17">vivienda y construcción</text>
+<rect x="420" y="178" width="786.6" height="25" rx="5" fill="#1d4ed8"/>
+<text x="1218.6" y="196.5" fill="#0f172a" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700">184</text>
+<text x="402" y="238.5" text-anchor="end" fill="#1e293b" font-family="Arial, Helvetica, sans-serif" font-size="17">cine, música y entretenimiento</text>
+<rect x="420" y="220" width="607.0" height="25" rx="5" fill="#2563eb"/>
+<text x="1039.0" y="238.5" fill="#0f172a" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700">142</text>
+<text x="402" y="280.5" text-anchor="end" fill="#1e293b" font-family="Arial, Helvetica, sans-serif" font-size="17">deportes</text>
+<rect x="420" y="262" width="406.1" height="25" rx="5" fill="#3b82f6"/>
+<text x="838.1" y="280.5" fill="#0f172a" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700">95</text>
+<text x="402" y="322.5" text-anchor="end" fill="#1e293b" font-family="Arial, Helvetica, sans-serif" font-size="17">salud y medicina</text>
+<rect x="420" y="304" width="350.6" height="25" rx="5" fill="#0f766e"/>
+<text x="782.5" y="322.5" fill="#0f172a" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700">82</text>
+<text x="402" y="364.5" text-anchor="end" fill="#1e293b" font-family="Arial, Helvetica, sans-serif" font-size="17">tecnología e informática</text>
+<rect x="420" y="346" width="316.4" height="25" rx="5" fill="#0d9488"/>
+<text x="748.4" y="364.5" fill="#0f172a" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700">74</text>
+<text x="402" y="406.5" text-anchor="end" fill="#1e293b" font-family="Arial, Helvetica, sans-serif" font-size="17">meteorología y fenómenos naturales</text>
+<rect x="420" y="388" width="247.9" height="25" rx="5" fill="#0891b2"/>
+<text x="680.0" y="406.5" fill="#0f172a" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700">58</text>
+<text x="402" y="448.5" text-anchor="end" fill="#1e293b" font-family="Arial, Helvetica, sans-serif" font-size="17">automoción</text>
+<rect x="420" y="430" width="222.3" height="25" rx="5" fill="#0284c7"/>
+<text x="654.3" y="448.5" fill="#0f172a" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700">52</text>
+<text x="402" y="490.5" text-anchor="end" fill="#1e293b" font-family="Arial, Helvetica, sans-serif" font-size="17">educación</text>
+<rect x="420" y="472" width="171.0" height="25" rx="5" fill="#4f46e5"/>
+<text x="603.0" y="490.5" fill="#0f172a" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700">40</text>
+<text x="402" y="532.5" text-anchor="end" fill="#1e293b" font-family="Arial, Helvetica, sans-serif" font-size="17">gastronomía y alimentación</text>
+<rect x="420" y="514" width="136.8" height="25" rx="5" fill="#7c3aed"/>
+<text x="568.8" y="532.5" fill="#0f172a" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700">32</text>
+<text x="402" y="574.5" text-anchor="end" fill="#1e293b" font-family="Arial, Helvetica, sans-serif" font-size="17">religión y espiritualidad</text>
+<rect x="420" y="556" width="124.0" height="25" rx="5" fill="#9333ea"/>
+<text x="556.0" y="574.5" fill="#0f172a" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700">29</text>
+<text x="402" y="616.5" text-anchor="end" fill="#1e293b" font-family="Arial, Helvetica, sans-serif" font-size="17">ciencia y espacio</text>
+<rect x="420" y="598" width="89.8" height="25" rx="5" fill="#c026d3"/>
+<text x="521.8" y="616.5" fill="#0f172a" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700">21</text>
+<text x="402" y="658.5" text-anchor="end" fill="#1e293b" font-family="Arial, Helvetica, sans-serif" font-size="17">moda y belleza</text>
+<rect x="420" y="640" width="68.4" height="25" rx="5" fill="#db2777"/>
+<text x="500.4" y="658.5" fill="#0f172a" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700">16</text>
+<text x="402" y="700.5" text-anchor="end" fill="#1e293b" font-family="Arial, Helvetica, sans-serif" font-size="17">turismo y viajes</text>
+<rect x="420" y="682" width="55.6" height="25" rx="5" fill="#e11d48"/>
+<text x="487.6" y="700.5" fill="#0f172a" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700">13</text>
+<text x="402" y="742.5" text-anchor="end" fill="#1e293b" font-family="Arial, Helvetica, sans-serif" font-size="17">agricultura y ganadería</text>
+<rect x="420" y="724" width="47.0" height="25" rx="5" fill="#ea580c"/>
+<text x="479.0" y="742.5" fill="#0f172a" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700">11</text>
+<text x="402" y="784.5" text-anchor="end" fill="#1e293b" font-family="Arial, Helvetica, sans-serif" font-size="17">animales y naturaleza</text>
+<rect x="420" y="766" width="38.5" height="25" rx="5" fill="#ca8a04"/>
+<text x="470.5" y="784.5" fill="#0f172a" font-family="Arial, Helvetica, sans-serif" font-size="17" font-weight="700">9</text>
+<text x="56" y="860" fill="#64748b" font-family="Arial, Helvetica, sans-serif" font-size="14">Fuente: tagged_data_no_none.json</text>
+</svg>

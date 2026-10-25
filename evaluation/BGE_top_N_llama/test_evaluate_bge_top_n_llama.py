@@ -32,6 +32,33 @@ class BgeTopNLlamaTests(unittest.TestCase):
             ['tema-b', 'tema-a'],
         )
 
+    def test_top_n_is_reordered_like_temas_json_before_llama(self) -> None:
+        topics = {
+            'tema-a': 'A',
+            'tema-b': 'B',
+            'tema-c': 'C',
+            'tema-d': 'D',
+        }
+        ranked_top_n = [
+            {'tema': 'tema-d', 'cross_encoder_score': 0.9},
+            {'tema': 'tema-b', 'cross_encoder_score': 0.8},
+            {'tema': 'tema-a', 'cross_encoder_score': 0.7},
+        ]
+
+        ordered = subject.base.order_candidates_by_catalog(
+            ranked_top_n, topics
+        )
+
+        self.assertEqual(
+            [candidate['tema'] for candidate in ordered],
+            ['tema-a', 'tema-b', 'tema-d'],
+        )
+        self.assertEqual(
+            subject.DEFAULT_RESULTS_DIR.name,
+            'results_llama3_2_3b_temas_order_two_prompts',
+        )
+        self.assertEqual(subject.DEFAULT_LLAMA_MODEL, 'llama3.2:3b')
+
     def test_report_separates_retrieval_and_selection(self) -> None:
         topics = {'tema-a': 'A', 'tema-b': 'B'}
         records = [
@@ -105,6 +132,14 @@ class BgeTopNLlamaTests(unittest.TestCase):
         self.assertEqual(
             configuration['bge_topic_representation'],
             subject.bge.TOPIC_TEMPLATE,
+        )
+        self.assertEqual(
+            configuration['candidate_order'],
+            subject.CANDIDATE_ORDER,
+        )
+        self.assertEqual(
+            configuration['prompt_strategy'],
+            subject.base.TWO_STAGE_PROMPT_STRATEGY,
         )
 
 

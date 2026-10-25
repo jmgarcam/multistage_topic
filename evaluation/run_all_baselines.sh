@@ -97,6 +97,16 @@ if (($# > 0)); then
     exit 2
 fi
 
+mkdir -p "$SCRIPT_DIR/run_logs"
+LOCK_FILE=${BASELINE_LOCK_FILE:-$SCRIPT_DIR/run_logs/.run_all_baselines.lock}
+exec {RUN_LOCK_FD}>"$LOCK_FILE"
+if ! flock -n "$RUN_LOCK_FD"; then
+    printf '%s\n' \
+        'Ya hay otra ejecución de run_all_baselines.sh en curso.' \
+        "Lock: $LOCK_FILE" >&2
+    exit 3
+fi
+
 RUN_ID=${BASELINE_RUN_ID:-$(date '+%Y%m%d_%H%M%S')}
 LOG_DIR=${BASELINE_LOG_DIR:-$SCRIPT_DIR/run_logs/$RUN_ID}
 mkdir -p "$LOG_DIR"
@@ -111,7 +121,15 @@ printf 'Directorio de logs: %s\n' "$LOG_DIR"
 printf 'Intentos máximos por baseline: %s\n' "$MAX_ATTEMPTS"
 printf 'Espera entre intentos: %s segundos\n' "$RETRY_DELAY_SECONDS"
 printf 'Reutilizar resultados Top-1 validados: %s\n' "$RESUME_RESULTS"
-printf 'Modelo Ollama: %s\n' "${OLLAMA_MODEL:-llama3.1:8b}"
+if [[ -n ${OLLAMA_MODEL:-} ]]; then
+    printf 'Modelo Ollama (sobrescrito): %s\n' "$OLLAMA_MODEL"
+else
+    printf 'Modelo de los tres baselines Llama: llama3.2:3b\n'
+fi
+printf '%s\n' \
+    'Estrategia Llama: extracción por ID de frase y clasificación.'
+printf '%s\n' \
+    'E5 + Llama: conserva E5 Top-1 si el margen Top-1/Top-2 >= 0.0025.'
 
 RESULT_NAMES=()
 RESULT_STATUSES=()

@@ -22,9 +22,15 @@ BGE_TOP_1_PATH = EVALUATION_DIR / 'BGE_top_1' / 'calculate_top_1.py'
 DEFAULT_BGE_RESULTS = (
     EVALUATION_DIR / 'BGE_top_1' / 'results' / 'bge_top_1_results.json'
 )
-DEFAULT_RESULTS_DIR = SCRIPT_DIR / 'results_llama3_1_8b'
+DEFAULT_LLAMA_MODEL = 'llama3.2:3b'
+DEFAULT_RESULTS_DIR = (
+    SCRIPT_DIR / 'results_llama3_2_3b_temas_order_two_prompts'
+)
 DEFAULT_CHECKPOINT_EVERY = 10
-PROMPT_VERSION = 'mteb_forced_topic_selection_v1_bge_top_n_v1'
+PROMPT_VERSION = (
+    'mteb_forced_topic_selection_v1_bge_top_n_v4_sentence_id'
+)
+CANDIDATE_ORDER = 'temas.json catalog order after Top-N selection'
 DIRECT_CANDIDATE_SOURCE = 'BGE computed directly from data_test'
 PRECOMPUTED_CANDIDATE_SOURCE = (
     'validated complete ranking from BGE Top-1 report'
@@ -69,7 +75,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--model',
-        default=os.environ.get('OLLAMA_MODEL', 'llama3.1:8b'),
+        default=os.environ.get('OLLAMA_MODEL', DEFAULT_LLAMA_MODEL),
         help='Modelo disponible en Ollama.',
     )
     parser.add_argument(
@@ -291,7 +297,12 @@ def build_report(
             'uses_e5_candidates': False,
             'n': n,
             'topic_count': len(topics),
+            'candidate_order': CANDIDATE_ORDER,
             'prompt_version': PROMPT_VERSION,
+            'prompt_strategy': base.TWO_STAGE_PROMPT_STRATEGY,
+            'event_evidence_strategy': base.EVENT_EVIDENCE_STRATEGY,
+            'llama_calls_per_valid_prediction': 2,
+            'event_extraction_candidates_visible': False,
             'decision_strategy': 'forced_topic_selection',
             'prediction_format': base.PREDICTION_FORMAT,
             'generation': 'Ollama API (temperature=0, seed=0)',
@@ -369,7 +380,7 @@ def build_report(
             'scope': (
                 'El ranking BGE se obtiene una vez, por cálculo o desde un '
                 'informe validado. Para cada N se mide por separado la '
-                'llamada HTTP y la inferencia de Llama.'
+                'extracción y la clasificación de Llama en dos llamadas.'
             ),
         },
         'predictions': predictions,
@@ -379,6 +390,7 @@ def build_report(
 def load_checkpoint(
     path: Path,
     records: list[dict[str, Any]],
+    topics: dict[str, str],
     n: int,
     bge_context: dict[str, Any],
 ) -> list[dict[str, Any]]:
@@ -388,6 +400,12 @@ def load_checkpoint(
     if not isinstance(report, dict):
         raise SystemExit(f'Checkpoint no válido: {path}')
     configuration = report.get('configuration')
+    if base.uses_legacy_literal_evidence(configuration):
+        print(
+            f'{path}: resultado anterior con copia literal; se reiniciará '
+            'en el mismo archivo con identificadores de frase.'
+        )
+        return []
     expected = {
         'bge_model': bge_context['model'],
         'bge_batch_size': bge_context['batch_size'],
@@ -395,7 +413,10 @@ def load_checkpoint(
         'bge_ranking_sha256': bge_context['ranking_sha256'],
         'llama_model': base.MODEL_NAME,
         'n': n,
+        'candidate_order': CANDIDATE_ORDER,
         'prompt_version': PROMPT_VERSION,
+        'prompt_strategy': base.TWO_STAGE_PROMPT_STRATEGY,
+        'event_evidence_strategy': base.EVENT_EVIDENCE_STRATEGY,
     }
     if not isinstance(configuration, dict) or any(
         configuration.get(key) != value for key, value in expected.items()
@@ -419,7 +440,9 @@ def load_checkpoint(
             raise SystemExit(f'{location}: _id desconocido o duplicado.')
         seen_ids.add(news_id)
         record = records_by_id[news_id]
-        candidates = record['candidates'][:n]
+        candidates = base.order_candidates_by_catalog(
+            record['candidates'][:n], topics
+        )
         candidate_names = [candidate['tema'] for candidate in candidates]
         if prediction.get('n') != n or prediction.get(
             'candidate_topics'
@@ -432,8 +455,12 @@ def load_checkpoint(
             prediction.get(base.DECISION_FIELD), candidate_names, location
         )
         prediction[base.DECISION_FIELD] = decision
-        base.validate_prediction_outputs(
-            prediction, candidate_names, decision, location
+        base.validate_two_stage_prediction_outputs(
+            prediction,
+            record['text'],
+            candidate_names,
+            decision,
+            location,
         )
         prediction['file'] = record['file']
         prediction['topics_correctos'] = list(record['topics_correctos'])
@@ -467,7 +494,9 @@ def evaluate_n(
     bge_context: dict[str, Any],
 ) -> None:
     output_path = results_dir / f'bge_top_{n}_llama_results.json'
-    predictions = load_checkpoint(output_path, records, n, bge_context)
+    predictions = load_checkpoint(
+        output_path, records, topics, n, bge_context
+    )
     completed_ids = {prediction['_id'] for prediction in predictions}
     pending = [record for record in records if record['_id'] not in completed_ids]
     order = {record['_id']: index for index, record in enumerate(records)}
@@ -492,10 +521,17 @@ def evaluate_n(
 
     try:
         for pending_index, record in enumerate(pending, start=1):
-            candidates = record['candidates'][:n]
+            candidates = base.order_candidates_by_catalog(
+                record['candidates'][:n], topics
+            )
             start = time.perf_counter()
-            decision, validity_raw_output, raw_output = base.generate_decision(
-                client, None, None, record['text'], candidates, topics
+            (
+                decision,
+                extraction,
+                event_raw_output,
+                raw_output,
+            ) = base.generate_two_stage_decision(
+                client, record['text'], candidates, topics
             )
             elapsed = time.perf_counter() - start
             candidate_names = [candidate['tema'] for candidate in candidates]
@@ -514,7 +550,22 @@ def evaluate_n(
                         for topic in record['topics_correctos']
                     ),
                     base.DECISION_FIELD: decision,
-                    base.VALIDITY_RAW_OUTPUT_FIELD: validity_raw_output,
+                    base.MAIN_EVENT_FIELD: (
+                        extraction[base.MAIN_EVENT_FIELD]
+                        if extraction is not None
+                        else None
+                    ),
+                    base.EVIDENCE_SENTENCE_ID_FIELD: (
+                        extraction[base.EVIDENCE_SENTENCE_ID_FIELD]
+                        if extraction is not None
+                        else None
+                    ),
+                    base.EVIDENCE_SENTENCE_FIELD: (
+                        extraction[base.EVIDENCE_SENTENCE_FIELD]
+                        if extraction is not None
+                        else None
+                    ),
+                    base.EVENT_EXTRACTION_RAW_OUTPUT_FIELD: event_raw_output,
                     base.RAW_OUTPUT_FIELD: raw_output,
                     'matches_real_topic': base.decision_matches_topics(
                         decision, record['topics_correctos']

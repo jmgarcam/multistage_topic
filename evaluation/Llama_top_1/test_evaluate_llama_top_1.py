@@ -6,6 +6,17 @@ import evaluate_llama_top_1 as subject
 
 
 class LlamaTop1Tests(unittest.TestCase):
+    def test_defaults_use_ordered_two_prompt_llama_3b_experiment(self) -> None:
+        self.assertEqual(subject.DEFAULT_LLAMA_MODEL, 'llama3.2:3b')
+        self.assertEqual(
+            subject.DEFAULT_OUTPUT.parent.name,
+            'results_llama3_2_3b_temas_order_two_prompts',
+        )
+        self.assertEqual(
+            subject.DEFAULT_OUTPUT.name,
+            'llama3_2_3b_direct_results.json',
+        )
+
     def test_prepare_records_uses_the_complete_catalog(self) -> None:
         test_records = [
             {'_id': 'news-1', 'file': 'test.json', 'text': 'Texto'}
@@ -67,14 +78,26 @@ class LlamaTop1Tests(unittest.TestCase):
         )
 
         self.assertEqual(report['dataset']['candidate_topics_per_news'], 2)
-        self.assertEqual(report['metrics']['llama_final_accuracy'], 1.0)
+        self.assertEqual(report['metrics']['slm_final_accuracy'], 1.0)
         configuration = report['configuration']
         self.assertFalse(configuration['uses_retriever'])
         self.assertFalse(configuration['uses_e5_candidates'])
         self.assertFalse(configuration['uses_bge_candidates'])
         self.assertFalse(configuration['uses_precomputed_candidates'])
         self.assertEqual(
+            configuration['candidate_order'], subject.CANDIDATE_ORDER
+        )
+        self.assertEqual(
+            configuration['prompt_strategy'],
+            subject.base.TWO_STAGE_PROMPT_STRATEGY,
+        )
+        self.assertEqual(configuration['slm_calls_per_valid_prediction'], 2)
+        self.assertEqual(
             configuration['labels_used_for'], 'metrics only'
+        )
+        self.assertNotIn('llama_final_accuracy', report['metrics'])
+        self.assertIn(
+            'total_slm_inference_time_seconds', report['timing']
         )
 
 

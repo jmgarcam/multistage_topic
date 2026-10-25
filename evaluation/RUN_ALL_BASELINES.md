@@ -34,6 +34,10 @@ normalmente. Para forzar que ambos Top-1 vuelvan a calcularse:
 BASELINE_RESUME_RESULTS=0 evaluation/run_all_baselines.sh
 ```
 
+El lanzador impide que haya dos ejecuciones simultáneas sobre la misma GPU y
+el mismo servidor Ollama. Si ya hay una activa, la segunda termina con código
+3 y muestra la ruta del lock.
+
 Para dejarlo ejecutándose al cerrar la terminal:
 
 ```bash
@@ -54,11 +58,21 @@ Los reintentos son configurables:
 ```bash
 BASELINE_MAX_ATTEMPTS=5 \
 BASELINE_RETRY_DELAY_SECONDS=300 \
-OLLAMA_MODEL=llama3.1:8b \
+OLLAMA_MODEL=llama3.2:3b \
 nohup evaluation/run_all_baselines.sh >/dev/null 2>&1 &
 ```
 
 
-Los tres baselines que usan Llama emplean por defecto `llama3.1:8b` con el
-prompt v1 original y guardan sus resultados en `results_llama3_1_8b/`. Los
-resultados anteriores permanecen en sus directorios originales.
+Los tres baselines que usan Llama emplean por defecto `llama3.2:3b`. El programa
+numera las frases y el primer prompt extrae el acontecimiento y selecciona un
+identificador sin ver las categorías; la frase original se recupera de forma
+determinista. El segundo prompt realiza la clasificación. En `E5 Top-N +
+Llama`, además, las noticias
+con margen Top-1/Top-2 mayor o igual que `0.0025` conservan E5 Top-1 sin llamar
+a Llama; solo los casos ambiguos reciben candidatos cercanos. Sus resultados
+se guardan en
+`results_llama3_2_3b_temas_order_two_prompts_e5_margin_0_0025/`. Llama Top-1 y
+BGE Top-N + Llama mantienen sus directorios de dos prompts. Los checkpoints de
+dos prompts con copia literal se reinician y sustituyen en esos mismos
+directorios. La variable `OLLAMA_MODEL` permite sobrescribir el modelo de los
+tres baselines.

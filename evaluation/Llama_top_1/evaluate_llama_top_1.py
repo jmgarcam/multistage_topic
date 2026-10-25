@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-'''Evalúa Llama directamente con todos los temas del catálogo.'''
+'''Evalúa un SLM directamente con todos los temas del catálogo.'''
 
 from __future__ import annotations
 
@@ -19,13 +19,19 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 EVALUATION_DIR = SCRIPT_DIR.parent
 PROJECT_DIR = EVALUATION_DIR.parent
 DATASET_DIR = PROJECT_DIR / 'dataset_mteb'
+DEFAULT_LLAMA_MODEL = 'llama3.2:3b'
 DEFAULT_OUTPUT = (
-    SCRIPT_DIR / 'results_llama3_1_8b' / 'llama_top_1_results.json'
+    SCRIPT_DIR
+    / 'results_llama3_2_3b_temas_order_two_prompts'
+    / 'llama3_2_3b_direct_results.json'
 )
 DEFAULT_CHECKPOINT_EVERY = 10
-PROMPT_VERSION = 'mteb_forced_topic_selection_v1_all_topics_direct_v1'
+PROMPT_VERSION = (
+    'mteb_forced_topic_selection_v1_all_topics_direct_v4_sentence_id'
+)
 CANDIDATE_MODE = 'complete_topic_catalog'
 CANDIDATE_SOURCE = 'temas.json complete catalog'
+CANDIDATE_ORDER = 'temas.json catalog order'
 
 if str(EVALUATION_DIR) not in sys.path:
     sys.path.insert(0, str(EVALUATION_DIR))
@@ -36,26 +42,26 @@ import evaluate_ollama_top_n_no_none as base  # noqa: E402
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            'Entrega directamente a Llama todos los temas de temas.json para '
+            'Entrega directamente al SLM todos los temas de temas.json para '
             'cada noticia de test y obliga al modelo a devolver uno.'
         )
     )
     parser.add_argument(
         '--model',
-        default=os.environ.get('OLLAMA_MODEL', 'llama3.1:8b'),
+        default=os.environ.get('OLLAMA_MODEL', DEFAULT_LLAMA_MODEL),
         help='Modelo disponible en Ollama.',
     )
     parser.add_argument(
         '--data-dir',
         type=Path,
         default=DATASET_DIR / 'data_test',
-        help='Directorio con las noticias de test sin etiquetas.',
+        help='Archivo JSON o directorio con las noticias de test.',
     )
     parser.add_argument(
         '--labelled-data-dir',
         type=Path,
         default=DATASET_DIR / 'data_test_labelled',
-        help='Copia etiquetada de test, usada únicamente para métricas.',
+        help='Archivo JSON o directorio etiquetado, usado solo para métricas.',
     )
     parser.add_argument(
         '--topics',
@@ -88,12 +94,21 @@ def sha256_json(payload: Any) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-def load_test_records(data_dir: Path) -> list[dict[str, str]]:
-    if not data_dir.is_dir():
-        raise SystemExit(f'No se encontró el directorio: {data_dir}')
-    paths = sorted(data_dir.glob('*.json'))
+def resolve_json_paths(data_path: Path) -> list[Path]:
+    if data_path.is_file():
+        if data_path.suffix.casefold() != '.json':
+            raise SystemExit(f'El archivo de datos no es JSON: {data_path}')
+        return [data_path]
+    if not data_path.is_dir():
+        raise SystemExit(f'No se encontró la ruta de datos: {data_path}')
+    paths = sorted(data_path.glob('*.json'))
     if not paths:
-        raise SystemExit(f'No se encontraron archivos JSON en {data_dir}.')
+        raise SystemExit(f'No se encontraron archivos JSON en {data_path}.')
+    return paths
+
+
+def load_test_records(data_dir: Path) -> list[dict[str, str]]:
+    paths = resolve_json_paths(data_dir)
 
     records: list[dict[str, str]] = []
     seen_ids: set[str] = set()
@@ -125,11 +140,7 @@ def load_test_records(data_dir: Path) -> list[dict[str, str]]:
 def load_labelled_records(
     data_dir: Path, topic_catalog: set[str]
 ) -> dict[str, dict[str, Any]]:
-    if not data_dir.is_dir():
-        raise SystemExit(f'No se encontró el directorio: {data_dir}')
-    paths = sorted(data_dir.glob('*.json'))
-    if not paths:
-        raise SystemExit(f'No se encontraron archivos JSON en {data_dir}.')
+    paths = resolve_json_paths(data_dir)
 
     labelled_by_id: dict[str, dict[str, Any]] = {}
     for path in paths:
@@ -237,6 +248,11 @@ def build_report(
             'prediction_format': base.PREDICTION_FORMAT,
             'candidate_mode': CANDIDATE_MODE,
             'candidate_source': CANDIDATE_SOURCE,
+            'candidate_order': CANDIDATE_ORDER,
+            'prompt_strategy': base.TWO_STAGE_PROMPT_STRATEGY,
+            'event_evidence_strategy': base.EVENT_EVIDENCE_STRATEGY,
+            'slm_calls_per_valid_prediction': 2,
+            'event_extraction_candidates_visible': False,
             'topic_count': len(topics),
             'uses_retriever': False,
             'uses_e5_candidates': False,
@@ -246,8 +262,8 @@ def build_report(
             'labels_used_for': 'metrics only',
             'generation': 'Ollama API (temperature=0, seed=0)',
             'metric_definitions': {
-                'llama_final_accuracy': (
-                    'fraction of final Llama decisions matching the correct '
+                'slm_final_accuracy': (
+                    'fraction of final SLM decisions matching the correct '
                     'topic'
                 ),
             },
@@ -266,11 +282,11 @@ def build_report(
         },
         'metrics': {
             'evaluated_news': evaluated,
-            'llama_final_hits': hits,
-            'llama_final_misses': evaluated - hits,
-            'llama_final_accuracy': round(accuracy, 6),
-            'llama_final_accuracy_percent': round(accuracy * 100, 2),
-            'llama_final_accuracy_confidence_interval_95': wilson_interval(
+            'slm_final_hits': hits,
+            'slm_final_misses': evaluated - hits,
+            'slm_final_accuracy': round(accuracy, 6),
+            'slm_final_accuracy_percent': round(accuracy * 100, 2),
+            'slm_final_accuracy_confidence_interval_95': wilson_interval(
                 hits, evaluated
             ),
             'invalid_decisions': sum(
@@ -279,15 +295,18 @@ def build_report(
             ),
         },
         'timing': {
-            'total_llama_inference_time_seconds': round(
+            'total_slm_inference_time_seconds': round(
                 sum(elapsed_times), 6
             ),
-            'mean_llama_inference_time_seconds': (
+            'mean_slm_inference_time_seconds': (
                 round(statistics.fmean(elapsed_times), 6)
                 if elapsed_times
                 else None
             ),
-            'scope': 'Una llamada de clasificación a Llama por noticia.',
+            'scope': (
+                'Dos llamadas por noticia: extracción del acontecimiento y '
+                'clasificación temática.'
+            ),
         },
         'predictions': predictions,
     }
@@ -305,10 +324,19 @@ def load_checkpoint(
     if not isinstance(report, dict):
         raise SystemExit(f'Checkpoint no válido: {path}')
     configuration = report.get('configuration')
+    if base.uses_legacy_literal_evidence(configuration):
+        print(
+            f'{path}: resultado anterior con copia literal; se reiniciará '
+            'en el mismo archivo con identificadores de frase.'
+        )
+        return []
     expected = {
         'model': base.MODEL_NAME,
         'prompt_version': PROMPT_VERSION,
         'candidate_mode': CANDIDATE_MODE,
+        'candidate_order': CANDIDATE_ORDER,
+        'prompt_strategy': base.TWO_STAGE_PROMPT_STRATEGY,
+        'event_evidence_strategy': base.EVENT_EVIDENCE_STRATEGY,
         'topic_count': len(topic_names),
         'input_data_sha256': context['input_data_sha256'],
         'topic_catalog_sha256': context['topic_catalog_sha256'],
@@ -343,12 +371,12 @@ def load_checkpoint(
             prediction.get(base.DECISION_FIELD), topic_names, location
         )
         if not isinstance(decision, str):
-            raise SystemExit(f'{location}: Llama debe devolver un único tema.')
+            raise SystemExit(f'{location}: el SLM debe devolver un único tema.')
         prediction[base.DECISION_FIELD] = decision
-        base.validate_prediction_outputs(
-            prediction, topic_names, decision, location
-        )
         record = records_by_id[news_id]
+        base.validate_two_stage_prediction_outputs(
+            prediction, record['text'], topic_names, decision, location
+        )
         prediction['file'] = record['file']
         prediction['topics_correctos'] = list(record['topics_correctos'])
         prediction['matches_real_topic'] = base.decision_matches_topics(
@@ -415,7 +443,7 @@ def main() -> None:
 
     if not pending:
         report = checkpoint()
-        accuracy = report['metrics']['llama_final_accuracy_percent']
+        accuracy = report['metrics']['slm_final_accuracy_percent']
         print(f'Resultados ya completos: {accuracy:.2f}%')
         return
 
@@ -428,13 +456,13 @@ def main() -> None:
     try:
         for pending_index, record in enumerate(pending, start=1):
             start = time.perf_counter()
-            decision, validity_raw_output, raw_output = base.generate_decision(
-                client,
-                None,
-                None,
-                record['text'],
-                record['candidates'],
-                topics,
+            (
+                decision,
+                extraction,
+                event_raw_output,
+                raw_output,
+            ) = base.generate_two_stage_decision(
+                client, record['text'], record['candidates'], topics
             )
             elapsed = time.perf_counter() - start
             if decision != 'invalid' and decision not in topic_names:
@@ -448,7 +476,22 @@ def main() -> None:
                     'topics_correctos': record['topics_correctos'],
                     'candidate_topics': topic_names,
                     base.DECISION_FIELD: decision,
-                    base.VALIDITY_RAW_OUTPUT_FIELD: validity_raw_output,
+                    base.MAIN_EVENT_FIELD: (
+                        extraction[base.MAIN_EVENT_FIELD]
+                        if extraction is not None
+                        else None
+                    ),
+                    base.EVIDENCE_SENTENCE_ID_FIELD: (
+                        extraction[base.EVIDENCE_SENTENCE_ID_FIELD]
+                        if extraction is not None
+                        else None
+                    ),
+                    base.EVIDENCE_SENTENCE_FIELD: (
+                        extraction[base.EVIDENCE_SENTENCE_FIELD]
+                        if extraction is not None
+                        else None
+                    ),
+                    base.EVENT_EXTRACTION_RAW_OUTPUT_FIELD: event_raw_output,
                     base.RAW_OUTPUT_FIELD: raw_output,
                     'matches_real_topic': base.decision_matches_topics(
                         decision, record['topics_correctos']
@@ -467,9 +510,9 @@ def main() -> None:
         raise
 
     report = checkpoint()
-    accuracy = report['metrics']['llama_final_accuracy_percent']
+    accuracy = report['metrics']['slm_final_accuracy_percent']
     print(f'Resultados guardados: {args.output}')
-    print(f'Llama final accuracy: {accuracy:.2f}%')
+    print(f'SLM final accuracy: {accuracy:.2f}%')
 
 
 if __name__ == '__main__':

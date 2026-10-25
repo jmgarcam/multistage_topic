@@ -44,13 +44,13 @@ def parse_args() -> argparse.Namespace:
         '--data-dir',
         type=Path,
         default=DATASET_DIR / 'data_test',
-        help='Directorio con las noticias de test sin etiquetas.',
+        help='Archivo JSON o directorio con las noticias de test.',
     )
     parser.add_argument(
         '--labelled-data-dir',
         type=Path,
         default=DATASET_DIR / 'data_test_labelled',
-        help='Copia etiquetada de test, utilizada únicamente para métricas.',
+        help='Archivo JSON o directorio etiquetado, usado solo para métricas.',
     )
     parser.add_argument(
         '--topics',

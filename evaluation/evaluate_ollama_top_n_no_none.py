@@ -29,14 +29,37 @@ OUTPUT_FILE = 'ollama_llama_3_2_3b_top_n_no_none_results.json'
 DECISION_FIELD = 'ollama_decision'
 RAW_OUTPUT_FIELD = 'ollama_raw_output'
 VALIDITY_RAW_OUTPUT_FIELD = 'ollama_validity_raw_output'
+EVENT_EXTRACTION_RAW_OUTPUT_FIELD = 'ollama_event_extraction_raw_output'
+MAIN_EVENT_FIELD = 'main_event'
+EVIDENCE_SENTENCE_FIELD = 'evidence_sentence'
+EVIDENCE_SENTENCE_ID_FIELD = 'evidence_sentence_id'
+LEGACY_TWO_STAGE_PROMPT_STRATEGY = (
+    'extract_main_event_and_literal_evidence_then_classify'
+)
+TWO_STAGE_PROMPT_STRATEGY = (
+    'extract_main_event_and_evidence_sentence_id_then_classify'
+)
+EVENT_EVIDENCE_STRATEGY = 'numbered_sentence_identifier'
+EVENT_EXTRACTION_MAX_NEW_TOKENS = 256
 MODEL_LABEL = 'Ollama llama3.1:8b'
 DEFAULT_BASE_URL = 'http://localhost:11434'
 DEFAULT_TIMEOUT_SECONDS = 300.0
+DEFAULT_MAX_RETRIES = 4
+DEFAULT_RETRY_BACKOFF_SECONDS = 5.0
+RETRYABLE_HTTP_STATUS_CODES = frozenset({429, 500, 502, 503, 504})
 NONE_TOPIC = 'ninguno'
 ALLOW_NONE_DECISION = False
 K = 10
 N_VALUES = [1, 3, 5, 7, 10]
 CHECKPOINT_EVERY = 10
+
+
+def uses_legacy_literal_evidence(configuration: Any) -> bool:
+    return (
+        isinstance(configuration, dict)
+        and configuration.get('prompt_strategy')
+        == LEGACY_TWO_STAGE_PROMPT_STRATEGY
+    )
 
 
 def resolve_path(configured_path: str) -> Path:
@@ -87,6 +110,26 @@ def candidate_options(
     if include_none:
         options.append(NONE_TOPIC)
     return list(dict.fromkeys(options))
+
+
+def order_candidates_by_catalog(
+    candidates: list[dict[str, Any]],
+    topic_catalog: dict[str, str],
+) -> list[dict[str, Any]]:
+    """Ordena un subconjunto de candidatos como aparecen en temas.json."""
+    candidates_by_topic: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        topic = candidate.get('tema')
+        if not isinstance(topic, str) or topic not in topic_catalog:
+            raise RuntimeError('La lista de candidatos contiene un tema inválido.')
+        if topic in candidates_by_topic:
+            raise RuntimeError(f'Tema candidato duplicado: {topic!r}.')
+        candidates_by_topic[topic] = candidate
+    return [
+        candidates_by_topic[topic]
+        for topic in topic_catalog
+        if topic in candidates_by_topic
+    ]
 
 
 def validate_decision(
@@ -186,6 +229,163 @@ def build_prompt(
         'represente de forma más directa el foco principal de la noticia.\n'
         '- No puedes responder "ninguno", combinar varios temas ni utilizar '
         'un valor fuera de la lista de candidatos.\n\n'
+        f'VALORES PERMITIDOS:\n{valid_options_text}\n\n'
+        'Devuelve exclusivamente un objeto JSON que cumpla exactamente este '
+        'esquema:\n\n'
+        f'{json.dumps(response_schema, ensure_ascii=False, indent=2)}'
+    )
+
+
+def segment_evidence_sentences(text: str) -> list[tuple[str, str]]:
+    stripped_text = text.strip()
+    if not stripped_text:
+        return []
+
+    boundary_pattern = re.compile(
+        r'[.!?]+["»”’)]*(?:[ \t\r\n]+|$)|\r?\n+'
+    )
+    sentences: list[str] = []
+    start = 0
+    for match in boundary_pattern.finditer(stripped_text):
+        content_end = match.end()
+        while (
+            content_end > match.start()
+            and stripped_text[content_end - 1].isspace()
+        ):
+            content_end -= 1
+        if content_end == match.start():
+            content_end = match.start()
+        sentence = stripped_text[start:content_end].strip()
+        if sentence:
+            sentences.append(sentence)
+        start = match.end()
+    trailing_sentence = stripped_text[start:].strip()
+    if trailing_sentence:
+        sentences.append(trailing_sentence)
+    if not sentences:
+        sentences.append(stripped_text)
+    return [
+        (f'F{position}', sentence)
+        for position, sentence in enumerate(sentences, start=1)
+    ]
+
+
+def build_event_extraction_schema(
+    sentence_ids: list[str],
+) -> dict[str, Any]:
+    if not sentence_ids:
+        raise ValueError('Se necesita al menos un identificador de frase.')
+    return {
+        'type': 'object',
+        'properties': {
+            'acontecimiento_principal': {
+                'type': 'string',
+                'minLength': 1,
+            },
+            'frase_evidencia_id': {
+                'type': 'string',
+                'enum': sentence_ids,
+            },
+        },
+        'required': ['acontecimiento_principal', 'frase_evidencia_id'],
+        'additionalProperties': False,
+    }
+
+
+def build_event_extraction_prompt(text: str) -> str:
+    numbered_sentences = segment_evidence_sentences(text)
+    schema = build_event_extraction_schema(
+        [sentence_id for sentence_id, _ in numbered_sentences]
+    )
+    sentence_text = '\n\n'.join(
+        f'{sentence_id}: {sentence}'
+        for sentence_id, sentence in numbered_sentences
+    )
+    return (
+        'Analiza la noticia sin asignarle todavía ninguna categoría.\n\n'
+        f'FRASES NUMERADAS DE LA NOTICIA:\n{sentence_text}\n\n'
+        'INSTRUCCIONES:\n\n'
+        '1. Identifica el acontecimiento principal: qué ha ocurrido, a quién '
+        'afecta y cuál es el objeto central.\n'
+        '2. Ignora antecedentes, contexto, consecuencias secundarias y '
+        'menciones incidentales.\n'
+        '3. Selecciona el identificador de la única frase que aporte la '
+        'evidencia más directa del acontecimiento principal.\n'
+        '4. Devuelve únicamente el identificador; no copies ni reformules la '
+        'frase de evidencia.\n\n'
+        'Devuelve exclusivamente un objeto JSON que cumpla exactamente este '
+        'esquema:\n\n'
+        f'{json.dumps(schema, ensure_ascii=False, indent=2)}'
+    )
+
+
+def validate_event_extraction(
+    raw_output: str, text: str
+) -> dict[str, str] | None:
+    try:
+        decoded = json.loads(raw_output)
+    except json.JSONDecodeError:
+        return None
+    expected_fields = {
+        'acontecimiento_principal',
+        'frase_evidencia_id',
+    }
+    if not isinstance(decoded, dict) or set(decoded) != expected_fields:
+        return None
+    event = decoded.get('acontecimiento_principal')
+    evidence_id = decoded.get('frase_evidencia_id')
+    if not isinstance(event, str) or not isinstance(evidence_id, str):
+        return None
+    event = normalize_spaces(event)
+    if not event:
+        return None
+    sentences_by_id = dict(segment_evidence_sentences(text))
+    if evidence_id not in sentences_by_id:
+        return None
+    return {
+        MAIN_EVENT_FIELD: event,
+        EVIDENCE_SENTENCE_ID_FIELD: evidence_id,
+        EVIDENCE_SENTENCE_FIELD: sentences_by_id[evidence_id],
+    }
+
+
+def build_event_based_classification_prompt(
+    text: str,
+    candidates: list[dict[str, Any]],
+    temas: dict[str, str],
+    main_event: str,
+    evidence_sentence_id: str,
+    evidence_sentence: str,
+) -> str:
+    candidate_names = [candidate['tema'] for candidate in candidates]
+    candidate_text = '\n\n'.join(
+        f'{position}. Tema candidato: {topic}\n'
+        f'   Definición: {temas[topic]}'
+        for position, topic in enumerate(candidate_names, start=1)
+    )
+    response_schema = build_response_schema(
+        candidate_names, include_none=False
+    )
+    valid_options_text = '\n'.join(
+        f'- {option}'
+        for option in response_schema['properties']['tema']['enum']
+    )
+    return (
+        'Selecciona la categoría que mejor encaja con el acontecimiento '
+        'principal de la noticia.\n\n'
+        f'NOTICIA COMPLETA:\n{text}\n\n'
+        f'ACONTECIMIENTO PRINCIPAL EXTRAÍDO:\n{main_event}\n\n'
+        f'IDENTIFICADOR DE LA EVIDENCIA:\n{evidence_sentence_id}\n\n'
+        f'FRASE DE EVIDENCIA ORIGINAL:\n{evidence_sentence}\n\n'
+        f'TEMAS CANDIDATOS:\n{candidate_text}\n\n'
+        'INSTRUCCIONES:\n\n'
+        '- Comprueba la extracción anterior contra la noticia completa.\n'
+        '- Elige obligatoriamente el tema cuya definición encaje mejor con '
+        'el acontecimiento principal.\n'
+        '- No elijas un tema por una palabra, entidad, causa, consecuencia o '
+        'mención secundaria.\n'
+        '- Debes devolver exactamente un tema candidato.\n'
+        '- No puedes responder "ninguno" ni utilizar otra etiqueta.\n\n'
         f'VALORES PERMITIDOS:\n{valid_options_text}\n\n'
         'Devuelve exclusivamente un objeto JSON que cumpla exactamente este '
         'esquema:\n\n'
@@ -577,10 +777,62 @@ def get_timeout_seconds() -> float:
     return timeout
 
 
+def get_max_retries() -> int:
+    raw_value = os.environ.get(
+        'OLLAMA_MAX_RETRIES', str(DEFAULT_MAX_RETRIES)
+    )
+    try:
+        max_retries = int(raw_value)
+    except ValueError as exc:
+        raise SystemExit(
+            'OLLAMA_MAX_RETRIES debe ser un entero no negativo.'
+        ) from exc
+    if max_retries < 0:
+        raise SystemExit(
+            'OLLAMA_MAX_RETRIES debe ser un entero no negativo.'
+        )
+    return max_retries
+
+
+def get_retry_backoff_seconds() -> float:
+    raw_value = os.environ.get(
+        'OLLAMA_RETRY_BACKOFF_SECONDS',
+        str(DEFAULT_RETRY_BACKOFF_SECONDS),
+    )
+    try:
+        backoff = float(raw_value)
+    except ValueError as exc:
+        raise SystemExit(
+            'OLLAMA_RETRY_BACKOFF_SECONDS debe ser un número no negativo.'
+        ) from exc
+    if backoff < 0:
+        raise SystemExit(
+            'OLLAMA_RETRY_BACKOFF_SECONDS debe ser un número no negativo.'
+        )
+    return backoff
+
+
 @dataclass(frozen=True)
 class OllamaClient:
     base_url: str
     timeout_seconds: float
+    max_retries: int = DEFAULT_MAX_RETRIES
+    retry_backoff_seconds: float = DEFAULT_RETRY_BACKOFF_SECONDS
+
+    def _retry_delay(self, failed_attempt: int) -> float:
+        return self.retry_backoff_seconds * (2 ** (failed_attempt - 1))
+
+    def _announce_retry(
+        self, path: str, reason: str, failed_attempt: int
+    ) -> None:
+        delay = self._retry_delay(failed_attempt)
+        print(
+            f'Ollama falló en {path} ({reason}); reintento '
+            f'{failed_attempt}/{self.max_retries} en {delay:g} s.',
+            flush=True,
+        )
+        if delay > 0:
+            time.sleep(delay)
 
     def request_json(
         self, path: str, payload: dict[str, Any] | None = None
@@ -597,26 +849,61 @@ class OllamaClient:
             headers=headers,
             method='POST' if payload is not None else 'GET',
         )
-        try:
-            with urlopen(
-                request, timeout=self.timeout_seconds
-            ) as response:
-                raw_response = response.read()
-        except HTTPError as exc:
-            details = exc.read().decode('utf-8', errors='replace').strip()
-            suffix = f': {details[:500]}' if details else ''
+        raw_response: bytes | None = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                with urlopen(
+                    request, timeout=self.timeout_seconds
+                ) as response:
+                    raw_response = response.read()
+                break
+            except HTTPError as exc:
+                details = exc.read().decode(
+                    'utf-8', errors='replace'
+                ).strip()
+                suffix = f': {details[:500]}' if details else ''
+                if (
+                    exc.code in RETRYABLE_HTTP_STATUS_CODES
+                    and attempt < self.max_retries
+                ):
+                    self._announce_retry(
+                        path,
+                        f'HTTP {exc.code}{suffix}',
+                        attempt + 1,
+                    )
+                    continue
+                raise RuntimeError(
+                    f'Ollama respondió HTTP {exc.code} en {path}{suffix}'
+                ) from exc
+            except URLError as exc:
+                if attempt < self.max_retries:
+                    self._announce_retry(
+                        path,
+                        f'error de conexión: {exc.reason}',
+                        attempt + 1,
+                    )
+                    continue
+                raise RuntimeError(
+                    f'No se pudo conectar con Ollama en {self.base_url}: '
+                    f'{exc.reason}'
+                ) from exc
+            except TimeoutError as exc:
+                if attempt < self.max_retries:
+                    self._announce_retry(
+                        path,
+                        f'timeout de {self.timeout_seconds:g} s',
+                        attempt + 1,
+                    )
+                    continue
+                raise RuntimeError(
+                    'Ollama excedió el timeout de '
+                    f'{self.timeout_seconds:g} s.'
+                ) from exc
+
+        if raw_response is None:
             raise RuntimeError(
-                f'Ollama respondió HTTP {exc.code} en {path}{suffix}'
-            ) from exc
-        except URLError as exc:
-            raise RuntimeError(
-                f'No se pudo conectar con Ollama en {self.base_url}: '
-                f'{exc.reason}'
-            ) from exc
-        except TimeoutError as exc:
-            raise RuntimeError(
-                f'Ollama excedió el timeout de {self.timeout_seconds:g} s.'
-            ) from exc
+                f'Ollama no devolvió una respuesta en {path}.'
+            )
 
         try:
             decoded = json.loads(raw_response)
@@ -687,7 +974,12 @@ class OllamaClient:
 
 def load_model() -> tuple[OllamaClient, None, None]:
     '''Comprueba la API y devuelve un cliente; no carga el modelo en Python.'''
-    client = OllamaClient(get_base_url(), get_timeout_seconds())
+    client = OllamaClient(
+        get_base_url(),
+        get_timeout_seconds(),
+        get_max_retries(),
+        get_retry_backoff_seconds(),
+    )
     client.ensure_model_available()
     print(f'API de Ollama: {client.base_url}')
     print(f'Modelo: {MODEL_NAME}')
@@ -762,6 +1054,79 @@ def generate_decision(
     return decision, validity_raw_output, raw_output
 
 
+def generate_two_stage_decision(
+    client: OllamaClient,
+    text: str,
+    candidates: list[dict[str, Any]],
+    temas: dict[str, str],
+) -> tuple[str, dict[str, str] | None, str, str | None]:
+    if ALLOW_NONE_DECISION:
+        raise RuntimeError(
+            'La estrategia de dos prompts requiere selección obligatoria.'
+        )
+
+    numbered_sentences = segment_evidence_sentences(text)
+    sentence_ids = [
+        sentence_id for sentence_id, _ in numbered_sentences
+    ]
+    event_raw_output = client.chat(
+        [
+            {
+                'role': 'system',
+                'content': (
+                    'Eres un analista de noticias. Primero extraes el '
+                    'acontecimiento principal y seleccionas el identificador '
+                    'de una frase de evidencia, sin clasificar la noticia.'
+                ),
+            },
+            {'role': 'user', 'content': build_event_extraction_prompt(text)},
+        ],
+        build_event_extraction_schema(sentence_ids),
+        max_new_tokens=EVENT_EXTRACTION_MAX_NEW_TOKENS,
+    )
+    extraction = validate_event_extraction(event_raw_output, text)
+    if extraction is None:
+        return 'invalid', None, event_raw_output, None
+
+    candidate_names = [candidate['tema'] for candidate in candidates]
+    response_schema = build_response_schema(
+        candidate_names, include_none=False
+    )
+    classification_raw_output = client.chat(
+        [
+            {
+                'role': 'system',
+                'content': (
+                    'Eres un clasificador temático. Usa el acontecimiento y '
+                    'la evidencia extraídos, compruébalos contra la noticia '
+                    'y devuelve únicamente el objeto JSON solicitado.'
+                ),
+            },
+            {
+                'role': 'user',
+                'content': build_event_based_classification_prompt(
+                    text,
+                    candidates,
+                    temas,
+                    extraction[MAIN_EVENT_FIELD],
+                    extraction[EVIDENCE_SENTENCE_ID_FIELD],
+                    extraction[EVIDENCE_SENTENCE_FIELD],
+                ),
+            },
+        ],
+        response_schema,
+    )
+    decision = validate_structured_decision(
+        classification_raw_output, candidate_names, include_none=False
+    )
+    return (
+        decision,
+        extraction,
+        event_raw_output,
+        classification_raw_output,
+    )
+
+
 def validate_prediction_outputs(
     prediction: dict[str, Any],
     candidate_names: list[str],
@@ -826,6 +1191,59 @@ def validate_prediction_outputs(
             f'{location}: la selección temática no coincide con la decisión '
             'guardada.'
         )
+
+
+def validate_two_stage_prediction_outputs(
+    prediction: dict[str, Any],
+    text: str,
+    candidate_names: list[str],
+    decision: list[str] | str,
+    location: str,
+) -> None:
+    event_raw_output = prediction.get(EVENT_EXTRACTION_RAW_OUTPUT_FIELD)
+    if not isinstance(event_raw_output, str) or not event_raw_output.strip():
+        raise SystemExit(
+            f'{location}: falta la extracción bruta del acontecimiento.'
+        )
+    extraction = validate_event_extraction(event_raw_output, text)
+    if extraction is None:
+        if (
+            decision != 'invalid'
+            or prediction.get(RAW_OUTPUT_FIELD) is not None
+            or prediction.get(MAIN_EVENT_FIELD) is not None
+            or prediction.get(EVIDENCE_SENTENCE_ID_FIELD) is not None
+            or prediction.get(EVIDENCE_SENTENCE_FIELD) is not None
+        ):
+            raise SystemExit(
+                f'{location}: una extracción inválida debe producir una '
+                'decisión invalid sin ejecutar la clasificación.'
+            )
+        return
+
+    if prediction.get(MAIN_EVENT_FIELD) != extraction[MAIN_EVENT_FIELD]:
+        raise SystemExit(
+            f'{location}: el acontecimiento guardado no coincide con la '
+            'extracción de Ollama.'
+        )
+    if (
+        prediction.get(EVIDENCE_SENTENCE_ID_FIELD)
+        != extraction[EVIDENCE_SENTENCE_ID_FIELD]
+    ):
+        raise SystemExit(
+            f'{location}: el identificador de evidencia guardado no coincide '
+            'con la extracción de Ollama.'
+        )
+    if (
+        prediction.get(EVIDENCE_SENTENCE_FIELD)
+        != extraction[EVIDENCE_SENTENCE_FIELD]
+    ):
+        raise SystemExit(
+            f'{location}: la evidencia guardada no coincide con la '
+            'extracción de Ollama.'
+        )
+    validate_prediction_outputs(
+        prediction, candidate_names, decision, location
+    )
 
 
 def build_report(

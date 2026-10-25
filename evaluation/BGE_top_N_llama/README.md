@@ -22,7 +22,18 @@ BGE Top-1 se ejecuta una sola vez y su ranking completo se reutiliza para todos
 los N después de validar el modelo, los parámetros, los hashes de los datos y
 todas las predicciones. No se leen rankings de E5. Las etiquetas de
 `data_test_labelled` se utilizan únicamente para métricas. Cada N se guarda
-como un checkpoint independiente dentro de `results_llama3_1_8b/`.
+como un checkpoint independiente.
+
+BGE selecciona el conjunto Top-N por score, pero antes de construir el prompt
+esos N temas se reordenan como aparecen en `temas.json`. Así el ranking no
+introduce una prioridad posicional adicional ante Llama. Para `N=12`, el orden
+de candidatos coincide con el baseline Llama directo.
+
+Cada predicción utiliza dos prompts. El programa numera las frases como `F1`,
+`F2`, etc. El primero identifica el acontecimiento principal y selecciona el
+identificador de una frase sin recibir los temas candidatos. La frase original
+se recupera mediante ese identificador. El segundo recibe la noticia, la
+extracción y los candidatos para seleccionar el tema.
 
 Para ignorar el informe de BGE Top-1 y recalcular el ranking:
 
@@ -42,6 +53,9 @@ evaluation/BGE_top_N_llama/run_bge_top_n_llama.sh --recompute-bge
   de selección.
 
 
-El selector usa `llama3.1:8b` con el prompt v1 original. Los resultados 8B se
-guardan en `results_llama3_1_8b/`; los resultados anteriores permanecen en sus
-directorios originales.
+El selector usa por defecto `llama3.2:3b`. Los resultados con orden controlado
+se guardan en `results_llama3_2_3b_temas_order_two_prompts/`. Las variantes 3B
+anteriores permanecen en `results_llama3_2_3b/` y
+`results_llama3_2_3b_temas_order/`; los resultados 1B tampoco se modifican. Un
+resultado previo de dos prompts con copia literal se reinicia y sustituye en
+el mismo directorio.

@@ -1,11 +1,12 @@
 #!/usr/bin/env python3
-'''Calcula E5 sobre test y evalúa Llama con cada Top-N posible.'''
+'''Calcula E5 sobre test y evalúa un SLM con cada Top-N posible.'''
 
 from __future__ import annotations
 
 import argparse
 import math
 import os
+import re
 import statistics
 import sys
 import time
@@ -20,9 +21,36 @@ DATASET_DIR = PROJECT_DIR / 'dataset_mteb'
 DEFAULT_E5_RESULTS = (
     EVALUATION_DIR / 'E5_top_N' / 'results' / 'e5_top_n_results.json'
 )
-DEFAULT_RESULTS_DIR = SCRIPT_DIR / 'results_llama3_1_8b'
+DEFAULT_LLAMA_MODEL = 'llama3.2:3b'
+DEFAULT_SIMILARITY_MARGIN_THRESHOLD = 0.0025
+DEFAULT_RESULTS_DIR = (
+    SCRIPT_DIR
+    / 'results_llama3_2_3b_temas_order_two_prompts_e5_margin_0_0025'
+)
 DEFAULT_CHECKPOINT_EVERY = 10
-PROMPT_VERSION = 'mteb_forced_topic_selection_v1_e5_top_n_v1'
+PROMPT_VERSION = (
+    'mteb_forced_topic_selection_v1_e5_top_n_v5_margin_gate_sentence_id'
+)
+NO_MARGIN_PROMPT_VERSION = (
+    'mteb_forced_topic_selection_v1_e5_top_n_v5_no_margin_sentence_id'
+)
+CANDIDATE_ORDER = 'temas.json catalog order after E5 margin filtering'
+NO_MARGIN_CANDIDATE_ORDER = 'temas.json catalog order of E5 Top-N'
+ROUTING_STRATEGY = (
+    'preserve_e5_top_1_when_margin_gte_threshold_else_slm'
+)
+NO_MARGIN_ROUTING_STRATEGY = 'always_route_e5_top_n_to_slm'
+NEAR_CANDIDATE_RULE = (
+    'top_1_similarity - candidate_similarity < threshold, capped at N'
+)
+NO_MARGIN_CANDIDATE_RULE = 'first N topics of E5 cosine-similarity ranking'
+E5_DECISION_SOURCE = 'e5_top_1'
+SLM_DECISION_SOURCE = 'slm'
+CONFIDENT_MARGIN_REASON = 'margin_gte_threshold'
+SINGLE_CANDIDATE_REASON = 'single_candidate_preserves_e5_top_1'
+AMBIGUOUS_MARGIN_REASON = 'margin_lt_threshold'
+NO_MARGIN_REASON = 'margin_gate_disabled'
+FINAL_DECISION_FIELD = 'final_decision'
 DIRECT_CANDIDATE_SOURCE = 'E5 computed directly from data_test'
 PRECOMPUTED_CANDIDATE_SOURCE = (
     'validated complete ranking from E5 Top-N report'
@@ -39,9 +67,10 @@ import evaluate_ollama_top_n_no_none as base  # noqa: E402
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description=(
-            'Calcula el ranking E5 directamente desde data_test y ejecuta '
-            'Llama con los primeros N temas. Sin valores N evalúa desde 1 '
-            'hasta el número total de temas.'
+            'Calcula el ranking E5 desde data_test, conserva E5 Top-1 en '
+            'casos de confianza y ejecuta el SLM únicamente para noticias '
+            'ambiguas. Sin valores N evalúa desde 1 hasta el número total '
+            'de temas.'
         )
     )
     parser.add_argument(
@@ -53,7 +82,7 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         '--model',
-        default=os.environ.get('OLLAMA_MODEL', 'llama3.1:8b'),
+        default=os.environ.get('OLLAMA_MODEL', DEFAULT_LLAMA_MODEL),
         help='Modelo disponible en Ollama.',
     )
     parser.add_argument(
@@ -85,13 +114,13 @@ def parse_args() -> argparse.Namespace:
         '--data-dir',
         type=Path,
         default=DATASET_DIR / 'data_test',
-        help='Directorio con las noticias de test.',
+        help='Archivo JSON o directorio con las noticias de test.',
     )
     parser.add_argument(
         '--labelled-data-dir',
         type=Path,
         default=DATASET_DIR / 'data_test_labelled',
-        help='Copia etiquetada de test, usada únicamente para métricas.',
+        help='Archivo JSON o directorio etiquetado, usado solo para métricas.',
     )
     parser.add_argument(
         '--topics',
@@ -104,6 +133,33 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=DEFAULT_RESULTS_DIR,
         help='Directorio de informes y checkpoints por valor de N.',
+    )
+    parser.add_argument(
+        '--result-slug',
+        default=os.environ.get('RESULT_SLUG'),
+        help=(
+            'Identificador del modelo usado en los nombres de los JSON. '
+            'Por defecto se deriva de --model.'
+        ),
+    )
+    parser.add_argument(
+        '--similarity-margin-threshold',
+        type=float,
+        default=DEFAULT_SIMILARITY_MARGIN_THRESHOLD,
+        help=(
+            'Conserva E5 Top-1 cuando similitud_top1 - similitud_top2 '
+            'es mayor o igual que este umbral. En casos ambiguos el SLM '
+            'recibe los candidatos situados dentro del mismo margen '
+            '(por defecto: %(default)s).'
+        ),
+    )
+    parser.add_argument(
+        '--disable-similarity-margin-gate',
+        action='store_true',
+        help=(
+            'Desactiva el enrutado por margen: todas las noticias se envían '
+            'al SLM con los primeros N candidatos E5.'
+        ),
     )
     parser.add_argument(
         '--checkpoint-every',
@@ -121,6 +177,132 @@ def resolve_n_values(requested: list[int], topic_count: int) -> list[int]:
     if any(n < 1 or n > topic_count for n in n_values):
         raise SystemExit(f'N debe estar entre 1 y {topic_count}.')
     return n_values
+
+
+def model_result_slug(model: str) -> str:
+    slug = re.sub(r'[^a-z0-9]+', '_', model.casefold()).strip('_')
+    if not slug:
+        raise SystemExit('No se pudo derivar un identificador desde --model.')
+    return slug
+
+
+def resolve_result_slug(requested: str | None, model: str) -> str:
+    slug = requested or model_result_slug(model)
+    if not re.fullmatch(r'[a-z0-9]+(?:_[a-z0-9]+)*', slug):
+        raise SystemExit(
+            '--result-slug solo admite minúsculas, números y guiones bajos.'
+        )
+    return slug
+
+
+def validate_similarity_margin_threshold(value: float) -> float:
+    if not math.isfinite(value) or value < 0 or value > 2:
+        raise SystemExit(
+            '--similarity-margin-threshold debe estar entre 0 y 2.'
+        )
+    return value
+
+
+def similarity_margin(higher: float, lower: float) -> float:
+    return round(float(higher) - float(lower), 12)
+
+
+def route_prediction(
+    record: dict[str, Any],
+    topics: dict[str, str],
+    n: int,
+    similarity_margin_threshold: float | None,
+) -> dict[str, Any]:
+    ranked_candidates = record['candidates']
+    if len(ranked_candidates) < 2:
+        raise RuntimeError(
+            'El enrutado por margen necesita al menos dos candidatos E5.'
+        )
+
+    top_1 = ranked_candidates[0]
+    top_2 = ranked_candidates[1]
+    margin = similarity_margin(
+        top_1['similarity'], top_2['similarity']
+    )
+    if margin < 0:
+        raise RuntimeError('El ranking E5 no está ordenado por similitud.')
+
+    common = {
+        'e5_top_1_topic': top_1['tema'],
+        'e5_top_1_similarity': float(top_1['similarity']),
+        'e5_top_2_topic': top_2['tema'],
+        'e5_top_2_similarity': float(top_2['similarity']),
+        'e5_top_1_top_2_margin': margin,
+    }
+    if similarity_margin_threshold is None:
+        return {
+            **common,
+            'decision_source': SLM_DECISION_SOURCE,
+            'routing_reason': NO_MARGIN_REASON,
+            'candidates': base.order_candidates_by_catalog(
+                [dict(candidate) for candidate in ranked_candidates[:n]],
+                topics,
+            ),
+        }
+    if n == 1:
+        return {
+            **common,
+            'decision_source': E5_DECISION_SOURCE,
+            'routing_reason': SINGLE_CANDIDATE_REASON,
+            'candidates': [dict(top_1)],
+        }
+    if margin >= similarity_margin_threshold:
+        return {
+            **common,
+            'decision_source': E5_DECISION_SOURCE,
+            'routing_reason': CONFIDENT_MARGIN_REASON,
+            'candidates': [dict(top_1)],
+        }
+
+    nearby_ranked_candidates = [
+        dict(candidate)
+        for candidate in ranked_candidates[:n]
+        if (
+            similarity_margin(
+                top_1['similarity'], candidate['similarity']
+            )
+            < similarity_margin_threshold
+        )
+    ]
+    if len(nearby_ranked_candidates) < 2:
+        raise RuntimeError(
+            'Un caso ambiguo debe contener al menos los dos primeros temas.'
+        )
+    return {
+        **common,
+        'decision_source': SLM_DECISION_SOURCE,
+        'routing_reason': AMBIGUOUS_MARGIN_REASON,
+        'candidates': base.order_candidates_by_catalog(
+            nearby_ranked_candidates, topics
+        ),
+    }
+
+
+def routing_configuration(
+    similarity_margin_threshold: float | None,
+) -> dict[str, Any]:
+    if similarity_margin_threshold is None:
+        return {
+            'candidate_order': NO_MARGIN_CANDIDATE_ORDER,
+            'routing_strategy': NO_MARGIN_ROUTING_STRATEGY,
+            'similarity_margin_threshold': None,
+            'similarity_margin_gate_enabled': False,
+            'near_candidate_rule': NO_MARGIN_CANDIDATE_RULE,
+            'prompt_version': NO_MARGIN_PROMPT_VERSION,
+        }
+    return {
+        'candidate_order': CANDIDATE_ORDER,
+        'routing_strategy': ROUTING_STRATEGY,
+        'similarity_margin_threshold': similarity_margin_threshold,
+        'similarity_margin_gate_enabled': True,
+        'near_candidate_rule': NEAR_CANDIDATE_RULE,
+        'prompt_version': PROMPT_VERSION,
+    }
 
 
 def prepare_records(
@@ -199,20 +381,69 @@ def build_report(
     topics: dict[str, str],
     n: int,
     e5_context: dict[str, Any],
+    similarity_margin_threshold: float | None,
 ) -> dict[str, Any]:
-    llama_final_hits = sum(
+    routing = routing_configuration(similarity_margin_threshold)
+    final_hits = sum(
         prediction['matches_real_topic'] for prediction in predictions
     )
     evaluated = len(predictions)
-    llama_final_accuracy = (
-        llama_final_hits / evaluated if evaluated else 0.0
-    )
-    available = sum(
-        prediction['candidate_contains_real_topic']
+    final_accuracy = final_hits / evaluated if evaluated else 0.0
+    llama_predictions = [
+        prediction
         for prediction in predictions
+        if prediction['decision_source'] == SLM_DECISION_SOURCE
+    ]
+    e5_predictions = [
+        prediction
+        for prediction in predictions
+        if prediction['decision_source'] == E5_DECISION_SOURCE
+    ]
+    llama_routed = len(llama_predictions)
+    e5_direct = len(e5_predictions)
+    llama_routed_hits = sum(
+        prediction['matches_real_topic']
+        for prediction in llama_predictions
+    )
+    e5_direct_hits = sum(
+        prediction['matches_real_topic'] for prediction in e5_predictions
+    )
+    llama_routed_accuracy = (
+        llama_routed_hits / llama_routed if llama_routed else 0.0
+    )
+    e5_direct_accuracy = e5_direct_hits / e5_direct if e5_direct else 0.0
+    llama_candidate_available = sum(
+        prediction['candidate_contains_real_topic']
+        for prediction in llama_predictions
     )
     conditional_selection_accuracy = (
-        llama_final_hits / available if available else 0.0
+        llama_routed_hits / llama_candidate_available
+        if llama_candidate_available
+        else 0.0
+    )
+    llama_invalid_decisions = sum(
+        prediction[base.DECISION_FIELD] == 'invalid'
+        for prediction in llama_predictions
+    )
+    llama_topic_changes = sum(
+        prediction[base.DECISION_FIELD] != 'invalid'
+        and prediction[base.DECISION_FIELD]
+        != prediction['e5_top_1_topic']
+        for prediction in llama_predictions
+    )
+    llama_helped = sum(
+        prediction['e5_top_1_topic'] not in prediction['topics_correctos']
+        and prediction['matches_real_topic']
+        for prediction in llama_predictions
+    )
+    llama_harmed = sum(
+        prediction['e5_top_1_topic'] in prediction['topics_correctos']
+        and not prediction['matches_real_topic']
+        for prediction in llama_predictions
+    )
+    evaluated_e5_hits = sum(
+        prediction['e5_top_1_topic'] in prediction['topics_correctos']
+        for prediction in predictions
     )
     retriever_top_1_hits = sum(
         record['candidates'][0]['tema'] in record['topics_correctos']
@@ -231,7 +462,7 @@ def build_report(
     candidate_recall = candidate_recall_hits / len(records) if records else 0.0
     elapsed_times = [
         float(prediction['inference_time_seconds'])
-        for prediction in predictions
+        for prediction in llama_predictions
     ]
     return {
         'status': 'complete' if evaluated == len(records) else 'in_progress',
@@ -246,7 +477,7 @@ def build_report(
             'e5_topic_prefix': e5.E5_PREFIX.strip(),
             'e5_topic_representation': e5.TOPIC_TEMPLATE,
             'e5_ranking_sha256': e5_context['ranking_sha256'],
-            'llama_model': base.MODEL_NAME,
+            'slm_model': base.MODEL_NAME,
             'candidate_source': e5_context['candidate_source'],
             'uses_precomputed_e5_results': e5_context[
                 'uses_precomputed_results'
@@ -256,8 +487,25 @@ def build_report(
             ],
             'n': n,
             'topic_count': len(topics),
-            'prompt_version': PROMPT_VERSION,
+            'candidate_order': routing['candidate_order'],
+            'routing_strategy': routing['routing_strategy'],
+            'similarity_margin_threshold': routing[
+                'similarity_margin_threshold'
+            ],
+            'similarity_margin_gate_enabled': routing[
+                'similarity_margin_gate_enabled'
+            ],
+            'near_candidate_rule': routing['near_candidate_rule'],
+            'n_is_maximum_slm_candidate_count': True,
+            'prompt_version': routing['prompt_version'],
+            'prompt_strategy': base.TWO_STAGE_PROMPT_STRATEGY,
+            'event_evidence_strategy': base.EVENT_EVIDENCE_STRATEGY,
+            'slm_calls_per_valid_routed_prediction': 2,
+            'slm_calls_per_e5_direct_prediction': 0,
+            'event_extraction_candidates_visible': False,
             'decision_strategy': 'forced_topic_selection',
+            'final_decision_field': FINAL_DECISION_FIELD,
+            'legacy_decision_field': base.DECISION_FIELD,
             'prediction_format': base.PREDICTION_FORMAT,
             'generation': 'Ollama API (temperature=0, seed=0)',
             'metric_definitions': {
@@ -266,16 +514,20 @@ def build_report(
                     'is correct; equal to micro-precision for this dataset'
                 ),
                 'candidate_recall_at_n': (
-                    'fraction of news with the correct topic among the N '
-                    'candidates sent to Llama'
+                    'fraction of news with the correct topic among the first '
+                    'N topics of the complete E5 ranking'
                 ),
-                'llama_final_accuracy': (
-                    'fraction of final Llama decisions matching the correct '
-                    'topic'
+                'final_accuracy': (
+                    'fraction of routed final decisions matching the correct '
+                    'topic, whether the source was E5 or the SLM'
+                ),
+                'slm_final_accuracy': (
+                    'alias of final_accuracy; it includes '
+                    'decisions preserved directly from E5'
                 ),
                 'conditional_selection_accuracy': (
-                    'Llama accuracy restricted to news where the correct '
-                    'topic was available among the candidates'
+                    'SLM accuracy among routed news where the correct topic '
+                    'was available in the candidate set'
                 ),
             },
             'api_base_url': base.get_base_url(),
@@ -301,23 +553,61 @@ def build_report(
             'retriever_top_1_accuracy_percent': round(
                 retriever_top_1_accuracy * 100, 2
             ),
-            'llama_final_hits': llama_final_hits,
-            'llama_final_misses': evaluated - llama_final_hits,
-            'llama_final_accuracy': round(llama_final_accuracy, 6),
-            'llama_final_accuracy_percent': round(
-                llama_final_accuracy * 100, 2
+            'final_hits': final_hits,
+            'final_misses': evaluated - final_hits,
+            'final_accuracy': round(final_accuracy, 6),
+            'final_accuracy_percent': round(final_accuracy * 100, 2),
+            'final_accuracy_confidence_interval_95': wilson_interval(
+                final_hits, evaluated
             ),
-            'llama_final_accuracy_confidence_interval_95': wilson_interval(
-                llama_final_hits, evaluated
+            'slm_final_hits': final_hits,
+            'slm_final_misses': evaluated - final_hits,
+            'slm_final_accuracy': round(final_accuracy, 6),
+            'slm_final_accuracy_percent': round(
+                final_accuracy * 100, 2
             ),
+            'slm_final_accuracy_confidence_interval_95': wilson_interval(
+                final_hits, evaluated
+            ),
+            'e5_direct_decisions': e5_direct,
+            'e5_direct_hits': e5_direct_hits,
+            'e5_direct_accuracy': round(e5_direct_accuracy, 6),
+            'e5_direct_accuracy_percent': round(
+                e5_direct_accuracy * 100, 2
+            ),
+            'slm_routed_decisions': llama_routed,
+            'slm_routed_percent': round(
+                llama_routed / evaluated * 100 if evaluated else 0.0, 2
+            ),
+            'slm_routed_hits': llama_routed_hits,
+            'slm_routed_accuracy': round(llama_routed_accuracy, 6),
+            'slm_routed_accuracy_percent': round(
+                llama_routed_accuracy * 100, 2
+            ),
+            'slm_invalid_decisions': llama_invalid_decisions,
+            'slm_valid_topic_changes': llama_topic_changes,
+            'slm_helped_vs_e5_top_1': llama_helped,
+            'slm_harmed_vs_e5_top_1': llama_harmed,
+            'net_hit_change_vs_e5_top_1': final_hits - evaluated_e5_hits,
             'candidate_recall_at_n_hits': candidate_recall_hits,
             'candidate_recall_at_n': round(candidate_recall, 6),
             'candidate_recall_at_n_percent': round(
                 candidate_recall * 100, 2
             ),
-            'retrieval_errors': evaluated - available,
-            'selection_opportunities': available,
-            'selection_errors': available - llama_final_hits,
+            'retrieval_errors_at_n': len(records) - candidate_recall_hits,
+            'slm_candidate_recall_routed_hits': (
+                llama_candidate_available
+            ),
+            'slm_candidate_recall_routed': round(
+                llama_candidate_available / llama_routed
+                if llama_routed
+                else 0.0,
+                6,
+            ),
+            'selection_opportunities': llama_candidate_available,
+            'selection_errors': (
+                llama_candidate_available - llama_routed_hits
+            ),
             'conditional_selection_accuracy': round(
                 conditional_selection_accuracy, 6
             ),
@@ -327,14 +617,23 @@ def build_report(
         },
         'timing': {
             'e5_ranking': e5_context['timing'],
-            'llama_total_inference_time_seconds': round(
+            'slm_total_inference_time_seconds': round(
                 sum(elapsed_times), 6
             ),
-            'llama_per_news_inference_time': mean_time_summary(elapsed_times),
+            'slm_per_routed_news_inference_time': mean_time_summary(
+                elapsed_times
+            ),
             'scope': (
                 'El ranking E5 se obtiene una vez, por cálculo o desde un '
-                'informe validado. Para cada N se mide por separado la '
-                'llamada HTTP y la inferencia de Llama.'
+                'informe validado. '
+                + (
+                    'Todas las noticias ejecutan extracción y clasificación '
+                    'en dos llamadas con el Top-N completo de E5.'
+                    if similarity_margin_threshold is None
+                    else 'Las noticias con margen suficiente conservan E5 '
+                    'Top-1 sin llamar al SLM. Solo los casos ambiguos '
+                    'ejecutan extracción y clasificación en dos llamadas.'
+                )
             ),
         },
         'predictions': predictions,
@@ -344,8 +643,10 @@ def build_report(
 def load_checkpoint(
     path: Path,
     records: list[dict[str, Any]],
+    topics: dict[str, str],
     n: int,
     e5_context: dict[str, Any],
+    similarity_margin_threshold: float | None,
 ) -> list[dict[str, Any]]:
     if not path.is_file():
         return []
@@ -353,11 +654,29 @@ def load_checkpoint(
     if not isinstance(report, dict):
         raise SystemExit(f'Checkpoint no válido: {path}')
     configuration = report.get('configuration')
+    if base.uses_legacy_literal_evidence(configuration):
+        print(
+            f'{path}: resultado anterior con copia literal; se reiniciará '
+            'en el mismo archivo con identificadores de frase.'
+        )
+        return []
+    routing = routing_configuration(similarity_margin_threshold)
     common_expected = {
         'e5_model': e5_context['model'],
-        'llama_model': base.MODEL_NAME,
+        'slm_model': base.MODEL_NAME,
         'n': n,
-        'prompt_version': PROMPT_VERSION,
+        'candidate_order': routing['candidate_order'],
+        'prompt_version': routing['prompt_version'],
+        'prompt_strategy': base.TWO_STAGE_PROMPT_STRATEGY,
+        'event_evidence_strategy': base.EVENT_EVIDENCE_STRATEGY,
+        'routing_strategy': routing['routing_strategy'],
+        'similarity_margin_threshold': routing[
+            'similarity_margin_threshold'
+        ],
+        'similarity_margin_gate_enabled': routing[
+            'similarity_margin_gate_enabled'
+        ],
+        'near_candidate_rule': routing['near_candidate_rule'],
     }
     if not isinstance(configuration, dict) or any(
         configuration.get(key) != value
@@ -397,25 +716,77 @@ def load_checkpoint(
             raise SystemExit(f'{location}: _id desconocido o duplicado.')
         seen_ids.add(news_id)
         record = records_by_id[news_id]
-        candidates = record['candidates'][:n]
+        route = route_prediction(
+            record, topics, n, similarity_margin_threshold
+        )
+        candidates = route['candidates']
         candidate_names = [candidate['tema'] for candidate in candidates]
-        if prediction.get('n') != n or prediction.get(
-            'candidate_topics'
-        ) != candidate_names:
+        expected_route_fields = {
+            'decision_source': route['decision_source'],
+            'routing_reason': route['routing_reason'],
+            'slm_called': (
+                route['decision_source'] == SLM_DECISION_SOURCE
+            ),
+            'e5_top_1_topic': route['e5_top_1_topic'],
+            'e5_top_1_similarity': route['e5_top_1_similarity'],
+            'e5_top_2_topic': route['e5_top_2_topic'],
+            'e5_top_2_similarity': route['e5_top_2_similarity'],
+            'e5_top_1_top_2_margin': route['e5_top_1_top_2_margin'],
+        }
+        if (
+            prediction.get('n') != n
+            or prediction.get('candidate_topics') != candidate_names
+            or any(
+                prediction.get(key) != value
+                for key, value in expected_route_fields.items()
+            )
+        ):
             raise SystemExit(
-                f'{location}: los candidatos guardados no coinciden con '
-                'el ranking E5 calculado directamente.'
+                f'{location}: el enrutado o los candidatos guardados no '
+                'coinciden con el ranking E5 y la configuración de enrutado.'
             )
         decision = base.validate_saved_decision(
             prediction.get(base.DECISION_FIELD), candidate_names, location
         )
         prediction[base.DECISION_FIELD] = decision
-        base.validate_prediction_outputs(
-            prediction, candidate_names, decision, location
-        )
+        if prediction.get(FINAL_DECISION_FIELD) != decision:
+            raise SystemExit(
+                f'{location}: final_decision no coincide con la decisión '
+                'guardada.'
+            )
+        if route['decision_source'] == E5_DECISION_SOURCE:
+            if decision != route['e5_top_1_topic']:
+                raise SystemExit(
+                    f'{location}: una decisión directa debe conservar E5 '
+                    'Top-1.'
+                )
+            if any(
+                prediction.get(field) is not None
+                for field in (
+                    base.MAIN_EVENT_FIELD,
+                    base.EVIDENCE_SENTENCE_ID_FIELD,
+                    base.EVIDENCE_SENTENCE_FIELD,
+                    base.EVENT_EXTRACTION_RAW_OUTPUT_FIELD,
+                    base.RAW_OUTPUT_FIELD,
+                )
+            ):
+                raise SystemExit(
+                    f'{location}: una decisión directa no debe contener '
+                    'salidas del SLM.'
+                )
+        else:
+            base.validate_two_stage_prediction_outputs(
+                prediction,
+                record['text'],
+                candidate_names,
+                decision,
+                location,
+            )
         prediction['file'] = record['file']
         prediction['topics_correctos'] = list(record['topics_correctos'])
-        prediction['candidate_scores'] = [dict(candidate) for candidate in candidates]
+        prediction['candidate_scores'] = [
+            dict(candidate) for candidate in candidates
+        ]
         prediction['candidate_contains_real_topic'] = any(
             topic in candidate_names for topic in record['topics_correctos']
         )
@@ -441,39 +812,69 @@ def evaluate_n(
     client_holder: list[base.OllamaClient],
     results_dir: Path,
     e5_context: dict[str, Any],
+    similarity_margin_threshold: float | None,
+    result_slug: str,
 ) -> None:
-    output_path = results_dir / f'e5_top_{n}_llama_results.json'
-    predictions = load_checkpoint(output_path, records, n, e5_context)
+    output_path = results_dir / f'e5_top_{n}_{result_slug}_results.json'
+    predictions = load_checkpoint(
+        output_path,
+        records,
+        topics,
+        n,
+        e5_context,
+        similarity_margin_threshold,
+    )
     completed_ids = {prediction['_id'] for prediction in predictions}
     pending = [record for record in records if record['_id'] not in completed_ids]
     order = {record['_id']: index for index, record in enumerate(records)}
 
     def checkpoint() -> dict[str, Any]:
         predictions.sort(key=lambda prediction: order[prediction['_id']])
-        report = build_report(records, predictions, topics, n, e5_context)
+        report = build_report(
+            records,
+            predictions,
+            topics,
+            n,
+            e5_context,
+            similarity_margin_threshold,
+        )
         e5.save_json(output_path, report)
         return report
 
     if not pending:
         report = checkpoint()
-        accuracy = report['metrics']['llama_final_accuracy_percent']
+        accuracy = report['metrics']['final_accuracy_percent']
         print(f'N={n}: completo, {accuracy:.2f}%')
         return
 
-    if not client_holder:
-        client, _, _ = base.load_model()
-        client_holder.append(client)
-    client = client_holder[0]
     generated_since_checkpoint = 0
 
     try:
         for pending_index, record in enumerate(pending, start=1):
-            candidates = record['candidates'][:n]
-            start = time.perf_counter()
-            decision, validity_raw_output, raw_output = base.generate_decision(
-                client, None, None, record['text'], candidates, topics
+            route = route_prediction(
+                record, topics, n, similarity_margin_threshold
             )
-            elapsed = time.perf_counter() - start
+            candidates = route['candidates']
+            if route['decision_source'] == E5_DECISION_SOURCE:
+                decision = route['e5_top_1_topic']
+                extraction = None
+                event_raw_output = None
+                raw_output = None
+                elapsed = 0.0
+            else:
+                if not client_holder:
+                    client, _, _ = base.load_model()
+                    client_holder.append(client)
+                start = time.perf_counter()
+                (
+                    decision,
+                    extraction,
+                    event_raw_output,
+                    raw_output,
+                ) = base.generate_two_stage_decision(
+                    client_holder[0], record['text'], candidates, topics
+                )
+                elapsed = time.perf_counter() - start
             candidate_names = [candidate['tema'] for candidate in candidates]
             predictions.append(
                 {
@@ -481,6 +882,18 @@ def evaluate_n(
                     'file': record['file'],
                     'topics_correctos': record['topics_correctos'],
                     'n': n,
+                    'decision_source': route['decision_source'],
+                    'routing_reason': route['routing_reason'],
+                    'slm_called': (
+                        route['decision_source'] == SLM_DECISION_SOURCE
+                    ),
+                    'e5_top_1_topic': route['e5_top_1_topic'],
+                    'e5_top_1_similarity': route['e5_top_1_similarity'],
+                    'e5_top_2_topic': route['e5_top_2_topic'],
+                    'e5_top_2_similarity': route['e5_top_2_similarity'],
+                    'e5_top_1_top_2_margin': route[
+                        'e5_top_1_top_2_margin'
+                    ],
                     'candidate_topics': candidate_names,
                     'candidate_scores': [
                         dict(candidate) for candidate in candidates
@@ -490,7 +903,23 @@ def evaluate_n(
                         for topic in record['topics_correctos']
                     ),
                     base.DECISION_FIELD: decision,
-                    base.VALIDITY_RAW_OUTPUT_FIELD: validity_raw_output,
+                    FINAL_DECISION_FIELD: decision,
+                    base.MAIN_EVENT_FIELD: (
+                        extraction[base.MAIN_EVENT_FIELD]
+                        if extraction is not None
+                        else None
+                    ),
+                    base.EVIDENCE_SENTENCE_ID_FIELD: (
+                        extraction[base.EVIDENCE_SENTENCE_ID_FIELD]
+                        if extraction is not None
+                        else None
+                    ),
+                    base.EVIDENCE_SENTENCE_FIELD: (
+                        extraction[base.EVIDENCE_SENTENCE_FIELD]
+                        if extraction is not None
+                        else None
+                    ),
+                    base.EVENT_EXTRACTION_RAW_OUTPUT_FIELD: event_raw_output,
                     base.RAW_OUTPUT_FIELD: raw_output,
                     'matches_real_topic': base.decision_matches_topics(
                         decision, record['topics_correctos']
@@ -509,8 +938,13 @@ def evaluate_n(
         raise
 
     report = checkpoint()
-    accuracy = report['metrics']['llama_final_accuracy_percent']
-    print(f'N={n}: completo, {accuracy:.2f}%')
+    metrics = report['metrics']
+    accuracy = metrics['final_accuracy_percent']
+    routed = metrics['slm_routed_decisions']
+    print(
+        f'N={n}: completo, {accuracy:.2f}%; '
+        f'{routed}/{len(records)} noticias enviadas al SLM'
+    )
 
 
 def main() -> None:
@@ -519,6 +953,13 @@ def main() -> None:
         raise SystemExit('--checkpoint-every debe ser mayor que cero.')
     if args.e5_batch_size < 1:
         raise SystemExit('--e5-batch-size debe ser mayor que cero.')
+    similarity_margin_threshold = (
+        None
+        if args.disable_similarity_margin_gate
+        else validate_similarity_margin_threshold(
+            args.similarity_margin_threshold
+        )
+    )
 
     topics = e5.load_topics(args.topics)
     n_values = resolve_n_values(args.n_values, len(topics))
@@ -530,6 +971,13 @@ def main() -> None:
 
     print(f'Modelo E5: {args.e5_model}')
     print(f'Noticias: {len(test_records)}; valores N: {n_values}')
+    if similarity_margin_threshold is None:
+        print('Enrutado por margen E5: desactivado')
+    else:
+        print(
+            'Umbral de margen E5 Top-1/Top-2: '
+            f'{similarity_margin_threshold:g}'
+        )
     uses_precomputed_results = (
         not args.recompute_e5 and args.e5_results.is_file()
     )
@@ -601,6 +1049,8 @@ def main() -> None:
     base.PROMPT_VERSION = 'mteb_forced_topic_selection_v1'
 
     client_holder: list[base.OllamaClient] = []
+    result_slug = resolve_result_slug(args.result_slug, args.model)
+    print(f'Identificador de resultados: {result_slug}')
     for n in n_values:
         evaluate_n(
             records,
@@ -610,6 +1060,8 @@ def main() -> None:
             client_holder,
             args.results_dir,
             e5_context,
+            similarity_margin_threshold,
+            result_slug,
         )
 
 

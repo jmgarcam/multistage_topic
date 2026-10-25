@@ -81,12 +81,21 @@ def _load_json_records(path: Path, allow_single: bool) -> list[Any]:
     raise SystemExit(f'{path} debe contener {expected} de objetos JSON.')
 
 
-def load_test_records(data_dir: Path) -> list[dict[str, str]]:
-    if not data_dir.is_dir():
-        raise SystemExit(f'No se encontró el directorio: {data_dir}')
-    paths = sorted(data_dir.glob('*.json'))
+def _resolve_json_paths(data_path: Path) -> list[Path]:
+    if data_path.is_file():
+        if data_path.suffix.casefold() != '.json':
+            raise SystemExit(f'El archivo de datos no es JSON: {data_path}')
+        return [data_path]
+    if not data_path.is_dir():
+        raise SystemExit(f'No se encontró la ruta de datos: {data_path}')
+    paths = sorted(data_path.glob('*.json'))
     if not paths:
-        raise SystemExit(f'No se encontraron archivos JSON en {data_dir}.')
+        raise SystemExit(f'No se encontraron archivos JSON en {data_path}.')
+    return paths
+
+
+def load_test_records(data_dir: Path) -> list[dict[str, str]]:
+    paths = _resolve_json_paths(data_dir)
 
     records: list[dict[str, str]] = []
     seen_ids: set[str] = set()
@@ -127,11 +136,7 @@ def normalize_topic_labels(
 def load_labelled_test(
     data_dir: Path, topic_catalog: set[str]
 ) -> dict[str, dict[str, Any]]:
-    if not data_dir.is_dir():
-        raise SystemExit(f'No se encontró el directorio: {data_dir}')
-    paths = sorted(data_dir.glob('*.json'))
-    if not paths:
-        raise SystemExit(f'No se encontraron archivos JSON en {data_dir}.')
+    paths = _resolve_json_paths(data_dir)
 
     labelled: dict[str, dict[str, Any]] = {}
     for path in paths:
