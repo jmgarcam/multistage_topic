@@ -1,0 +1,4 @@
+model,total_news,top_1_hits,top_1_accuracy_percent,mean_first_correct_rank,mean_reciprocal_rank,total_e5_execution_time_seconds,device,result_file
+intfloat/multilingual-e5-small,600,483,80.5,1.646667,0.86913,14.003268,cuda,/root/repositorios/multistage_topic/evaluation_mi_dataset/e5_results/intfloat_model_sizes/multilingual_e5_small_results.json
+intfloat/multilingual-e5-base,600,487,81.17,1.59,0.875903,6.54605,cuda,/root/repositorios/multistage_topic/evaluation_mi_dataset/e5_results/intfloat_model_sizes/multilingual_e5_base_results.json
+intfloat/multilingual-e5-large,600,493,82.17,1.473333,0.886372,27.014807,cuda,/root/repositorios/multistage_topic/evaluation_mi_dataset/e5_results/intfloat_model_sizes/multilingual_e5_large_results.json

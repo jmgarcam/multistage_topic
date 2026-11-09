@@ -24,3 +24,21 @@ ocho modelos. Las cinco iteraciones completas generan 645 informes.
 
 Los checkpoints están separados por iteración, por lo que volver a lanzar el
 script reanuda únicamente los resultados incompletos y no mezcla ejecuciones.
+
+Las seis gráficas equivalentes a las de `evaluation_mi_dataset/plots` están en
+`plots/`, con una subcarpeta por figura. Todas agregan las cinco iteraciones y
+los ocho modelos. Se regeneran juntas mediante:
+
+```bash
+evaluation_mi_dataset/5_iter/plots/run_all_plots.sh
+```
+
+También se mantiene en `plots/accuracy_and_time_statistics/` un resumen
+combinado de accuracy y tiempos.
+
+La selección del valor de `N` que maximiza la accuracy media de cada modelo y
+tamaño está en `test/`. Se puede regenerar mediante:
+
+```bash
+python3 evaluation_mi_dataset/5_iter/test/select_best_n.py
+```
